@@ -1,0 +1,145 @@
+version: '3.8'
+
+services:
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: epsilon-rabbitmq
+    ports:
+      - "5672:5672"    # AMQP port
+      - "15672:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: epsilon
+      RABBITMQ_DEFAULT_PASS: epsilon
+      RABBITMQ_DEFAULT_VHOST: /
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - epsilon-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Clone Worker
+  clone-worker:
+    build:
+      context: .
+      dockerfile: workers/clone/Dockerfile
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: epsilon
+      RABBITMQ_PASS: epsilon
+      RABBITMQ_VHOST: /
+      DATABASE_URL: ${DATABASE_URL}
+      SHARED_STORAGE_PATH: /shared/epsilon
+      WORKER_NAME: CloneWorker
+      WORKER_CONCURRENCY: 2
+    volumes:
+      - shared_storage:/shared/epsilon
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  # AI Agent Worker with CrewAI
+  ai-agent-worker:
+    build:
+      context: .
+      dockerfile: workers/ai-agent/Dockerfile
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: epsilon
+      RABBITMQ_PASS: epsilon
+      RABBITMQ_VHOST: /
+      DATABASE_URL: ${DATABASE_URL}
+      SHARED_STORAGE_PATH: /shared/epsilon
+      WORKER_NAME: AIAgentWorker
+      WORKER_CONCURRENCY: 1
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PYTHONPATH: /app:/app/workers/ai-agent
+    volumes:
+      - shared_storage:/shared/epsilon
+      - ../sdk-epsilon/archetypes:/app/sdk-epsilon/archetypes:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  # Execute Worker
+  executor-worker:
+    build:
+      context: .
+      dockerfile: workers/executor/Dockerfile
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: epsilon
+      RABBITMQ_PASS: epsilon
+      RABBITMQ_VHOST: /
+      DATABASE_URL: ${DATABASE_URL}
+      SHARED_STORAGE_PATH: /shared/epsilon
+      WORKER_NAME: ExecuteWorker
+      WORKER_CONCURRENCY: 1
+    volumes:
+      - shared_storage:/shared/epsilon
+      # Add Docker socket for container execution (if needed)
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  # Job Fetcher Worker
+  job-fetcher-worker:
+    build:
+      context: .
+      dockerfile: workers/job-fetcher/Dockerfile
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: epsilon
+      RABBITMQ_PASS: epsilon
+      RABBITMQ_VHOST: /
+      DATABASE_URL: ${DATABASE_URL}
+      POLLING_INTERVAL: 5
+      WORKER_NAME: JobFetcherWorker
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+volumes:
+  rabbitmq_data:
+    name: epsilon-rabbitmq-data
+  shared_storage:
+    name: epsilon-shared-storage
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SHARED_STORAGE_HOST_PATH:-./shared_storage}
+
+networks:
+  epsilon-network:
+    name: epsilon-network
+    driver: bridge
