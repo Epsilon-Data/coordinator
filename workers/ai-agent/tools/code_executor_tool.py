@@ -99,8 +99,11 @@ class CodeExecutorTool(BaseTool):
         if not build_folder.exists():
             return None
             
-        # Look for any .yml or .yaml file in build folder
-        yml_files = list(build_folder.glob("*.yml")) + list(build_folder.glob("*.yaml"))
+        # Look for build.yml file in build folder
+        yml_files = []
+        build_yml = build_folder / "build.yml"
+        if build_yml.exists():
+            yml_files = [build_yml]
         
         for yml_file in yml_files:
             try:
@@ -213,8 +216,11 @@ class CodeExecutorTool(BaseTool):
         if not build_folder.exists():
             return None
             
-        # Look for any .yml or .yaml file in build folder
-        yml_files = list(build_folder.glob("*.yml")) + list(build_folder.glob("*.yaml"))
+        # Look for build.yml file in build folder
+        yml_files = []
+        build_yml = build_folder / "build.yml"
+        if build_yml.exists():
+            yml_files = [build_yml]
         
         for yml_file in yml_files:
             try:
