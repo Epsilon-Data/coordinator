@@ -161,23 +161,37 @@ class JobFetcherWorker:
         except Exception as e:
             logger.error(f"Error reverting job status: {str(e)}")
 
+    def _poll_for_jobs(self):
+        """Poll for pending jobs and process them"""
+        try:
+            # Fetch pending jobs
+            jobs = self.fetch_pending_jobs()
+            
+            if self.config.job_fetch_mode == "polling":
+                # In polling mode, process jobs directly without RabbitMQ
+                for job in jobs:
+                    logger.info(f"Found pending job {job['job_id']} - marked as queued")
+            else:
+                # In RabbitMQ mode, publish to queue
+                for job in jobs:
+                    self.publish_job(job)
+                    
+        except Exception as e:
+            logger.error(f"Error polling for jobs: {e}")
+
     def run(self):
         """Main worker loop."""
-        logger.info("Starting Job Fetcher Worker...")
+        logger.info(f"Starting Job Fetcher Worker in {self.config.job_fetch_mode} mode...")
         
-        # Connect to RabbitMQ
-        self.connect_rabbitmq()
+        if self.config.job_fetch_mode != "polling":
+            # Connect to RabbitMQ only if not in polling mode
+            self.connect_rabbitmq()
         
         logger.info(f"Starting polling loop with interval: {self.polling_interval} seconds")
         
         while True:
             try:
-                # Fetch pending jobs
-                jobs = self.fetch_pending_jobs()
-                
-                # Publish each job to RabbitMQ
-                for job in jobs:
-                    self.publish_job(job)
+                self._poll_for_jobs()
                 
                 # Wait before next poll
                 time.sleep(self.polling_interval)
@@ -185,7 +199,7 @@ class JobFetcherWorker:
             except Exception as e:
                 logger.error(f"Error in main loop: {str(e)}")
                 # Try to reconnect to RabbitMQ if connection was lost
-                if self.connection and self.connection.is_closed:
+                if self.config.job_fetch_mode != "polling" and self.connection and self.connection.is_closed:
                     logger.info("Reconnecting to RabbitMQ...")
                     try:
                         self.connect_rabbitmq()

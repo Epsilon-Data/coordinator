@@ -37,6 +37,8 @@ services:
       SHARED_STORAGE_PATH: /shared/epsilon
       WORKER_NAME: CloneWorker
       WORKER_CONCURRENCY: 2
+      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
+      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
     volumes:
       - shared_storage:/shared/epsilon
     depends_on:
@@ -65,6 +67,8 @@ services:
       WORKER_CONCURRENCY: 1
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       PYTHONPATH: /app:/app/workers/ai-agent
+      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
+      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
     volumes:
       - shared_storage:/shared/epsilon
       - ../sdk-epsilon/archetypes:/app/sdk-epsilon/archetypes:ro
@@ -92,6 +96,8 @@ services:
       SHARED_STORAGE_PATH: /shared/epsilon
       WORKER_NAME: ExecuteWorker
       WORKER_CONCURRENCY: 1
+      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
+      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
     volumes:
       - shared_storage:/shared/epsilon
       # Add Docker socket for container execution (if needed)
@@ -117,8 +123,9 @@ services:
       RABBITMQ_PASS: epsilon
       RABBITMQ_VHOST: /
       DATABASE_URL: ${DATABASE_URL}
-      POLLING_INTERVAL: 5
+      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
       WORKER_NAME: JobFetcherWorker
+      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -127,6 +134,33 @@ services:
     restart: unless-stopped
     deploy:
       replicas: 1
+
+  # API Server
+  api-server:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: epsilon-api-server
+    ports:
+      - "8001:8001"  # API server port
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SHARED_STORAGE_PATH: /shared/epsilon
+      API_PORT: 8001
+      API_HOST: 0.0.0.0
+      DEBUG: ${DEBUG:-false}
+      PYTHONPATH: /app:/app/api
+    volumes:
+      - shared_storage:/shared/epsilon:ro  # Read-only access to shared storage
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   rabbitmq_data:

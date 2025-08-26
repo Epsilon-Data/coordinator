@@ -28,6 +28,9 @@ class Config:
     worker_name: Optional[str] = os.getenv("WORKER_NAME")
     worker_concurrency: int = int(os.getenv("WORKER_CONCURRENCY", "1"))
     
+    # Job fetching mode: "rabbitmq" or "polling"
+    job_fetch_mode: str = os.getenv("JOB_FETCH_MODE", "rabbitmq")
+    
     # Exchange and queue names
     exchange_name: str = "epsilon.jobs"
     exchange_type: str = "topic"

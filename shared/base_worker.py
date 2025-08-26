@@ -4,7 +4,7 @@ import signal
 import sys
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import pika
 from pika.adapters.blocking_connection import BlockingChannel

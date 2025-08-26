@@ -1,5 +1,14 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict, Any, Optional
+
+
+class CodeViolation(BaseModel):
+    """Individual code policy violation"""
+    file: str
+    line: int
+    field: str
+    code: str
+    type: str  # 'attribute_access', 'dictionary_access', 'print_statement'
 
 
 class AnalysisDecision(BaseModel):
@@ -10,3 +19,5 @@ class AnalysisDecision(BaseModel):
     reasoning: str
     risks_identified: List[str]
     recommendations: List[str]
+    pii_details: Optional[List[CodeViolation]] = []  # Detailed code violations
+    analyzed_files: Optional[List[str]] = []  # Files that were analyzed
