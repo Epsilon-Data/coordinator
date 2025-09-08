@@ -1,0 +1,11 @@
+# Enclave binaries
+kmstool_enclave_cli
+libnsm.so
+
+# Build artifacts
+*.eif
+*.tar.gz
+
+# Downloaded files
+aws-nitro-enclaves-cli.tar.gz
+nsm-api.tar.gz

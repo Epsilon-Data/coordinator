@@ -111,6 +111,8 @@ services:
       USE_LOCAL_ENCLAVE: ${USE_LOCAL_ENCLAVE:-false}
     volumes:
       - shared_storage:/shared/epsilon
+      - /usr/bin/nitro-cli:/usr/bin/nitro-cli:ro
+      - /var/run/nitro_enclaves:/var/run/nitro_enclaves
       # Add Docker socket for container execution (if needed)
       # - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
