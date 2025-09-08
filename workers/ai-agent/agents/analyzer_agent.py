@@ -11,7 +11,11 @@ def create_analyzer_agent() -> Agent:
         backstory="""You are a security analyst specialized in detecting PII leakage 
         in data analysis outputs. You carefully examine execution results including stdout, 
         stderr, and output files to identify any potential privacy violations. The code has 
-        already been executed - your job is to analyze the results, not execute code.""",
+        already been executed - your job is to analyze the results, not execute code.
+        You understand the difference between synthetic test data and real PII.
+        Healthcare dummy data with generic identifiers is used for testing and is acceptable.
+        Only flag actual personal information, not test datasets
+        """,
         tools=[],  # No tools needed - analyze provided execution results
         verbose=True
     )

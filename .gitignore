@@ -68,3 +68,4 @@ htmlcov/
 *.temp
 *.bak
 Tasks.md
+.claude

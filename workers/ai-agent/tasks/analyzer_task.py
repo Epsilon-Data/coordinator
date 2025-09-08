@@ -41,7 +41,10 @@ def create_analyzer_task(agent: Agent, execution_result: ExecutionResult, pii_fi
         4. Identify any potential privacy violations
         5. Assess the risk level (LOW/MEDIUM/HIGH)
         
-        Be thorough and conservative - err on the side of caution.
+        IMPORTANT: Distinguish between dummy/test data and real PII:
+        - Dummy data patterns: "text_value_XXX", "patient_XXX", synthetic IDs, test data
+        - Real PII: Actual names, real emails, valid SSNs, real patient records
+        Only flag REAL PII as violations. Dummy healthcare data for testing is acceptable.
         Do NOT execute any code - only analyze the results provided above.
         """,
         agent=agent,

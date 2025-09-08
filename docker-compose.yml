@@ -98,6 +98,17 @@ services:
       WORKER_CONCURRENCY: 1
       JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
       POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
+      # AWS KMS Configuration - Temporary hardcoded for debugging
+      AWS_ACCESS_KEY_ID: "AKIAT2NDRIEUUFGW7NHW"
+      AWS_SECRET_ACCESS_KEY: "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"
+      AWS_SESSION_TOKEN: ""
+      AWS_KMS_KEY_ARN: "arn:aws:kms:ap-southeast-2:262872842537:key/mrk-a98741cf7b9949ec9931d62438892b48"
+      AWS_KMS_KEY_ID: "arn:aws:kms:ap-southeast-2:262872842537:key/mrk-a98741cf7b9949ec9931d62438892b48"
+      AWS_REGION: "ap-southeast-2"
+      KMS_REGION: "ap-southeast-2"
+      S3_BUCKET: ${S3_BUCKET:-epsilon-datasets}
+      # Testing Mode: Set to 'true' for local enclave simulation, 'false' for real Nitro Enclaves
+      USE_LOCAL_ENCLAVE: ${USE_LOCAL_ENCLAVE:-false}
     volumes:
       - shared_storage:/shared/epsilon
       # Add Docker socket for container execution (if needed)
