@@ -1,59 +1,53 @@
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import quote
+
+# Auto-load .env file from project root
+from dotenv import load_dotenv
+
+# Find project root (where .env is located)
+_current_dir = Path(__file__).resolve().parent
+_project_root = _current_dir.parent  # Go up from shared/ to project root
+
+# Load .env file
+_env_file = _project_root / '.env'
+if _env_file.exists():
+    load_dotenv(_env_file)
+    print(f"✅ Loaded environment from {_env_file}")
+else:
+    # Try current working directory
+    _cwd_env = Path.cwd() / '.env'
+    if _cwd_env.exists():
+        load_dotenv(_cwd_env)
+        print(f"✅ Loaded environment from {_cwd_env}")
 
 
 @dataclass
 class Config:
     """Configuration for Epsilon Coordinator services"""
-    
-    # RabbitMQ settings
-    rabbitmq_host: str = os.getenv("RABBITMQ_HOST", "rabbitmq")
-    rabbitmq_port: int = int(os.getenv("RABBITMQ_PORT", "5672"))
-    rabbitmq_user: str = os.getenv("RABBITMQ_USER", "epsilon")
-    rabbitmq_pass: str = os.getenv("RABBITMQ_PASS", "epsilon")
-    rabbitmq_vhost: str = os.getenv("RABBITMQ_VHOST", "/")
-    
-    # Database settings - using existing Neon database
-    database_url: str = os.getenv(
-        "DATABASE_URL", 
-        "postgresql://user:pass@localhost:5432/epsilon"
-    )
-    
+
+    # Database settings
+    database_url: str = os.getenv("DATABASE_URL")
+
+    def __post_init__(self):
+        """Validate required configuration after initialization"""
+        if not self.database_url:
+            raise ValueError("DATABASE_URL environment variable is required but not set")
+
     # Shared storage settings
     shared_storage_path: str = os.getenv("SHARED_STORAGE_PATH", "/shared/epsilon")
-    
+
     # Worker settings
     worker_name: Optional[str] = os.getenv("WORKER_NAME")
     worker_concurrency: int = int(os.getenv("WORKER_CONCURRENCY", "1"))
-    
-    # Job fetching mode: "rabbitmq" or "polling"
-    job_fetch_mode: str = os.getenv("JOB_FETCH_MODE", "rabbitmq")
-    
-    # Exchange and queue names
-    exchange_name: str = "epsilon.jobs"
-    exchange_type: str = "topic"
-    
-    # Queue configurations
-    clone_queue: str = "epsilon.clone.queue"
-    ai_queue: str = "epsilon.ai.queue"
-    execute_queue: str = "epsilon.execute.queue"
-    notify_queue: str = "epsilon.notify.queue"
-    
-    # Routing keys
-    routing_key_created: str = "job.created"
-    routing_key_cloned: str = "job.cloned"
-    routing_key_approved: str = "job.approved"
-    routing_key_rejected: str = "job.rejected"
-    routing_key_completed: str = "job.completed"
-    routing_key_failed: str = "job.failed"
-    
-    @property
-    def rabbitmq_url(self) -> str:
-        """Get RabbitMQ connection URL"""
-        vhost = quote(self.rabbitmq_vhost, safe='')
-        return f"amqp://{self.rabbitmq_user}:{self.rabbitmq_pass}@{self.rabbitmq_host}:{self.rabbitmq_port}/{vhost}"
+
+    # AI Agent configuration
+    ai_agent_enabled: bool = os.getenv("AI_AGENT_ENABLED", "false").lower() == "true"
+
+    # Polling configuration
+    polling_interval: int = int(os.getenv("POLLING_INTERVAL", "5"))
+    batch_size: int = int(os.getenv("BATCH_SIZE", "10"))
 
 
 config = Config()

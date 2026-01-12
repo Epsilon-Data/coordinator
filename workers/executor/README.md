@@ -2,49 +2,57 @@
 
 A robust, scalable, and secure execution worker for the Epsilon system that processes job execution requests using AWS Nitro Enclaves.
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ```
 ┌─────────────────────┐       ┌──────────────────┐       ┌─────────────────┐
-│   RabbitMQ Queue    │──────>│  Executor Worker │──────>│   Result Queue  │
-│ epsilon.execute.job │       │    (EC2 Host)    │       │ epsilon.results │
+│   PostgreSQL DB     │──────>│  Executor Worker │──────>│   PostgreSQL DB │
+│ (ai_approved jobs)  │       │    (EC2 Host)    │       │ (completed/fail)│
 └─────────────────────┘       └────────┬─────────┘       └─────────────────┘
-                                        │ vsock
-                              ┌─────────┴─────────┐
-                              │  Nitro Enclave    │
-                              │ • KMS Decryption  │
-                              │ • Bundle Extract  │
-                              │ • Script Execute  │
-                              │ • Secure Cleanup  │
-                              └───────────────────┘
+                                       │ vsock
+                             ┌─────────┴─────────┐
+                             │  Nitro Enclave    │
+                             │ • KMS Decryption  │
+                             │ • Bundle Extract  │
+                             │ • Script Execute  │
+                             │ • Secure Cleanup  │
+                             └───────────────────┘
 ```
 
-### New Modular Architecture
+### Flat Module Architecture
 
-The codebase has been completely refactored for scalability, maintainability, and testability:
+The codebase uses a flat structure for maintainability and testability:
 
 ## Components
 
-### 1. **Executor Worker** (`execute_worker.py`)
-- Subscribes to RabbitMQ for approved jobs
+### 1. **Executor Worker** (`worker.py`)
+- Polls database for `ai_approved` jobs
 - Manages Nitro Enclave lifecycle
 - Sends encrypted scripts/data to enclave
-- Publishes results back to queue
+- Updates job status in database
 
-### 2. **Enclave Client** (`enclave/enclave_client.py`)
-- Handles vsock communication with enclave
-- Encrypts data using KMS (direct or envelope)
-- Retrieves EC2 instance credentials
+### 2. **Secure Executor** (`executor.py`)
+- Orchestrates the execution pipeline
+- Validates build configuration
+- Coordinates encryption and enclave communication
 
-### 3. **Enclave Manager** (`services/enclave_manager.py`)
-- Starts/stops Nitro Enclaves
-- Manages KMS proxy for attestation
-- Monitors enclave health
+### 3. **Clients** (`clients.py`)
+- `EnclaveClient` - vsock communication with enclave
+- `MiddlewareClient` - External data fetching
+- Hybrid encryption (RSA + AES-256-CBC)
 
-### 4. **Repository Manager** (`services/repository_manager.py`)
-- Extracts scripts and data from repositories
-- Handles different file formats (CSV, JSON)
-- Provides job metadata
+### 4. **Services** (`services.py`)
+- `BuildValidator` - Validates build.yml configuration
+- `ZipService` - Creates encrypted ZIP bundles
+- `CryptoService` - Handles hybrid encryption
+
+### 5. **Models** (`models.py`)
+- Pydantic models for type-safe data handling
+- `BuildConfig`, `ExecutionResult`, `EnclaveResponse`
+
+### 6. **Factories** (`factories.py`)
+- Dependency injection for testability
+- `EnclaveClientFactory`, `ExecutorFactory`
 
 ## Setup
 
@@ -76,7 +84,7 @@ The codebase has been completely refactored for scalability, maintainability, an
 
 1. Create enclave Docker image:
    ```bash
-   cd enclave
+   cd enclave_app
    docker build -t executor-enclave .
    ```
 
@@ -98,20 +106,20 @@ The codebase has been completely refactored for scalability, maintainability, an
 
 2. **Standalone**:
    ```bash
-   python execute_worker.py
+   python -m workers.executor.worker
    ```
 
 ## Environment Variables
 
-- `KMS_KEY_ARN`: ARN of KMS key for encryption
-- `KMS_REGION`: AWS region for KMS
-- `ENCLAVE_EIF_PATH`: Path to enclave image file
-- `ENCLAVE_MEMORY_MB`: Memory allocation for enclave (default: 4096)
-- `ENCLAVE_CPU_COUNT`: CPU cores for enclave (default: 2)
+- `DATABASE_URL`: PostgreSQL connection string
+- `MIDDLEWARE_ENDPOINT_URL`: Endpoint for encrypted data fetching
+- `USE_LOCAL_ENCLAVE`: Use local mock enclave for development
+- `ENCLAVE_CID`: Nitro Enclave CID (production)
+- `ENCLAVE_PORT`: vsock port (default: 5000)
 
 ## Local Development
 
-When running locally without Nitro Enclaves, the worker automatically falls back to mock execution mode:
+When running locally without Nitro Enclaves, set `USE_LOCAL_ENCLAVE=true` for mock execution:
 
 ```python
 # Mock execution output example
@@ -119,7 +127,6 @@ Mock Execution Result
 Job ID: JOB-123
 Script: example_analysis.py
 Data Size: 1024 bytes
-Repository Files: 15
 
 This is a mock execution result for local development.
 In production, this would run in a secure Nitro Enclave.
@@ -127,16 +134,28 @@ In production, this would run in a secure Nitro Enclave.
 
 ## Security Features
 
-1. **Attestation**: Enclave identity verified by KMS
-2. **Isolation**: No network access, encrypted memory
-3. **Encryption**: All data encrypted before sending to enclave
-4. **Credentials**: Temporary EC2 credentials, never stored
+1. **Zero Trust**: Data encrypted end-to-end, executor never sees plaintext
+2. **Hybrid Encryption**: RSA-OAEP for key exchange, AES-256-CBC for data
+3. **Attestation**: Enclave identity verified by KMS
+4. **Isolation**: No network access inside enclave, encrypted memory
+5. **Input Validation**: BuildValidator checks all inputs with Pydantic
 
-## Monitoring
+## File Structure
 
-- Worker logs: CloudWatch Logs
-- Enclave logs: `nitro-cli console --enclave-id <CID>`
-- Metrics: Execution time, success rate, enclave health
+```
+executor/
+├── worker.py          # Entry point (ExecutorWorker)
+├── executor.py        # SecureExecutor pipeline
+├── services.py        # BuildValidator, ZipService, CryptoService
+├── clients.py         # EnclaveClient, MiddlewareClient
+├── factories.py       # Dependency injection factories
+├── interfaces.py      # Abstract base classes
+├── models.py          # Pydantic data models
+├── exceptions.py      # Custom exceptions
+├── settings.py        # Pydantic configuration
+├── utils.py           # Logging decorators
+└── enclave_app/       # Enclave application code
+```
 
 ## Troubleshooting
 
@@ -144,7 +163,7 @@ In production, this would run in a secure Nitro Enclave.
    ```bash
    # Check enclave status
    nitro-cli describe-enclaves
-   
+
    # View console output
    nitro-cli console --enclave-id <CID>
    ```
@@ -152,7 +171,7 @@ In production, this would run in a secure Nitro Enclave.
 2. **KMS decryption failing**:
    - Verify PCR0 in key policy matches enclave
    - Check IAM role permissions
-   - Ensure KMS proxy is running
+   - Ensure vsock-proxy is running
 
 3. **vsock connection issues**:
    - Verify enclave CID

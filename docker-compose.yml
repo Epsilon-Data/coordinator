@@ -1,183 +1,96 @@
 version: '3.8'
 
 services:
-  # RabbitMQ Message Broker
-  rabbitmq:
-    image: rabbitmq:3.12-management
-    container_name: epsilon-rabbitmq
-    ports:
-      - "5672:5672"    # AMQP port
-      - "15672:15672"  # Management UI
-    environment:
-      RABBITMQ_DEFAULT_USER: epsilon
-      RABBITMQ_DEFAULT_PASS: epsilon
-      RABBITMQ_DEFAULT_VHOST: /
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    networks:
-      - epsilon-network
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # Clone Worker
+  # Clone Worker - Database polling only
   clone-worker:
     build:
       context: .
       dockerfile: workers/clone/Dockerfile
     environment:
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: epsilon
-      RABBITMQ_PASS: epsilon
-      RABBITMQ_VHOST: /
       DATABASE_URL: ${DATABASE_URL}
       SHARED_STORAGE_PATH: /shared/epsilon
       WORKER_NAME: CloneWorker
       WORKER_CONCURRENCY: 2
-      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
+      JOB_FETCH_MODE: polling
       POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
+      AI_AGENT_ENABLED: ${AI_AGENT_ENABLED}
     volumes:
       - shared_storage:/shared/epsilon
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
     networks:
       - epsilon-network
     restart: unless-stopped
-    deploy:
-      replicas: 1
 
-  # AI Agent Worker with CrewAI
-  ai-agent-worker:
-    build:
-      context: .
-      dockerfile: workers/ai-agent/Dockerfile
-    environment:
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: epsilon
-      RABBITMQ_PASS: epsilon
-      RABBITMQ_VHOST: /
-      DATABASE_URL: ${DATABASE_URL}
-      SHARED_STORAGE_PATH: /shared/epsilon
-      WORKER_NAME: AIAgentWorker
-      WORKER_CONCURRENCY: 1
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      PYTHONPATH: /app:/app/workers/ai-agent
-      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
-      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
-    volumes:
-      - shared_storage:/shared/epsilon
-      - ../sdk-epsilon/archetypes:/app/sdk-epsilon/archetypes:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - epsilon-network
-    restart: unless-stopped
-    deploy:
-      replicas: 1
+#  # AI Agent Worker with CrewAI - Database polling only
+#  ai-agent-worker:
+#    build:
+#      context: .
+#      dockerfile: workers/ai_agent/Dockerfile
+#    environment:
+#      DATABASE_URL: ${DATABASE_URL}
+#      SHARED_STORAGE_PATH: /shared/epsilon
+#      WORKER_NAME: AIAgentWorker
+#      WORKER_CONCURRENCY: 1
+#      OPENAI_API_KEY: ${OPENAI_API_KEY}
+#      PYTHONPATH: /app:/app/workers/ai_agent
+#      JOB_FETCH_MODE: polling
+#      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
+#    volumes:
+#      - shared_storage:/shared/epsilon
+#      - ../sdk-epsilon/archetypes:/app/sdk-epsilon/archetypes:ro
+#    networks:
+#      - epsilon-network
+#    restart: unless-stopped
 
-  # Execute Worker
+  # Execute Worker - Database polling with configurable enclave mode
   executor-worker:
     build:
       context: .
       dockerfile: workers/executor/Dockerfile
     environment:
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: epsilon
-      RABBITMQ_PASS: epsilon
-      RABBITMQ_VHOST: /
       DATABASE_URL: ${DATABASE_URL}
       SHARED_STORAGE_PATH: /shared/epsilon
       WORKER_NAME: ExecuteWorker
       WORKER_CONCURRENCY: 1
-      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
+      JOB_FETCH_MODE: polling
       POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
-      # AWS KMS Configuration - Temporary hardcoded for debugging
-      AWS_ACCESS_KEY_ID: "AKIAT2NDRIEUUFGW7NHW"
-      AWS_SECRET_ACCESS_KEY: "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"
-      AWS_SESSION_TOKEN: ""
-      AWS_KMS_KEY_ARN: "arn:aws:kms:ap-southeast-2:262872842537:key/mrk-a98741cf7b9949ec9931d62438892b48"
-      AWS_KMS_KEY_ID: "arn:aws:kms:ap-southeast-2:262872842537:key/mrk-a98741cf7b9949ec9931d62438892b48"
-      AWS_REGION: "ap-southeast-2"
-      KMS_REGION: "ap-southeast-2"
+      # AWS Configuration
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_KMS_KEY_ARN: ${AWS_KMS_KEY_ARN}
+      AWS_KMS_KEY_ID: ${AWS_KMS_KEY_ARN}
+      AWS_REGION: ${KMS_REGION:-ap-southeast-2}
+      KMS_REGION: ${KMS_REGION:-ap-southeast-2}
       S3_BUCKET: ${S3_BUCKET:-epsilon-datasets}
-      # Testing Mode: Set to 'true' for local enclave simulation, 'false' for real Nitro Enclaves
-      USE_LOCAL_ENCLAVE: ${USE_LOCAL_ENCLAVE:-false}
+      # Middleware endpoint for data fetching
+      # Use host.docker.internal to access host machine from inside Docker
+      MIDDLEWARE_ENDPOINT_URL: ${MIDDLEWARE_ENDPOINT_URL:-http://host.docker.internal:8001}
+      # Enclave Mode: Set to 'true' for local simulation, 'false' for real Nitro Enclaves
+      USE_LOCAL_ENCLAVE: ${USE_LOCAL_ENCLAVE:-true}
     volumes:
       - shared_storage:/shared/epsilon
+      # Mount Nitro CLI for production enclave mode
       - /usr/bin/nitro-cli:/usr/bin/nitro-cli:ro
       - /var/run/nitro_enclaves:/var/run/nitro_enclaves
-      # Add Docker socket for container execution (if needed)
-      # - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
     networks:
       - epsilon-network
     restart: unless-stopped
-    deploy:
-      replicas: 1
 
-  # Job Fetcher Worker
+  # Job Fetcher Worker - Database polling only
   job-fetcher-worker:
     build:
       context: .
-      dockerfile: workers/job-fetcher/Dockerfile
+      dockerfile: workers/job_fetcher/Dockerfile
     environment:
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: epsilon
-      RABBITMQ_PASS: epsilon
-      RABBITMQ_VHOST: /
       DATABASE_URL: ${DATABASE_URL}
       POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
       WORKER_NAME: JobFetcherWorker
-      JOB_FETCH_MODE: ${JOB_FETCH_MODE:-rabbitmq}
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
+      JOB_FETCH_MODE: polling
     networks:
       - epsilon-network
     restart: unless-stopped
-    deploy:
-      replicas: 1
-
-  # API Server
-  api-server:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
-    container_name: epsilon-api-server
-    ports:
-      - "8001:8001"  # API server port
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      SHARED_STORAGE_PATH: /shared/epsilon
-      API_PORT: 8001
-      API_HOST: 0.0.0.0
-      DEBUG: ${DEBUG:-false}
-      PYTHONPATH: /app:/app/api
-    volumes:
-      - shared_storage:/shared/epsilon:ro  # Read-only access to shared storage
-    networks:
-      - epsilon-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
 
 volumes:
-  rabbitmq_data:
-    name: epsilon-rabbitmq-data
   shared_storage:
     name: epsilon-shared-storage
     driver: local

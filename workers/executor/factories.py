@@ -1,0 +1,123 @@
+"""
+Factories for creating executor components.
+"""
+import logging
+from typing import Optional
+
+from workers.executor.settings import Settings, get_settings
+from workers.executor.interfaces import IExecutor, IEnclaveClient, IMiddlewareClient
+from workers.executor.exceptions import ConfigurationError
+from workers.executor.clients import EnclaveClient, EnclaveClientLocal, MiddlewareClient
+from workers.executor.executor import SecureExecutor
+
+logger = logging.getLogger("epsilon.executor")
+
+
+class EnclaveClientFactory:
+    """Factory for creating enclave client instances."""
+
+    @staticmethod
+    def create_client(
+        settings: Optional[Settings] = None,
+    ) -> IEnclaveClient:
+        """
+        Create an enclave client based on configuration.
+
+        Args:
+            settings: Settings instance (uses default if None)
+
+        Returns:
+            Configured enclave client
+        """
+        if settings is None:
+            settings = get_settings()
+
+        try:
+            if settings.enclave.use_local_client:
+                logger.info("Creating local enclave client for testing")
+                return EnclaveClientLocal()
+            else:
+                logger.info("Creating Nitro Enclave client")
+                return EnclaveClient()
+
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to create enclave client: {e}",
+                details={'use_local': settings.enclave.use_local_client}
+            )
+
+
+class MiddlewareClientFactory:
+    """Factory for creating middleware client."""
+
+    @staticmethod
+    def create_client(settings: Optional[Settings] = None) -> IMiddlewareClient:
+        """
+        Create middleware client.
+
+        MIDDLEWARE_ENDPOINT_URL is required.
+
+        Args:
+            settings: Optional settings object
+
+        Returns:
+            MiddlewareClient instance
+        """
+        settings = settings or get_settings()
+        middleware_config = settings.middleware
+
+        if not middleware_config.endpoint_url:
+            raise ValueError(
+                "MIDDLEWARE_ENDPOINT_URL is required. "
+                "Set the endpoint URL (e.g., http://localhost:8001)"
+            )
+
+        logger.info(f"[MIDDLEWARE] Using endpoint: {middleware_config.endpoint_url}")
+        return MiddlewareClient(settings, middleware_config.endpoint_url)
+
+
+class ExecutorFactory:
+    """Factory for creating job executor instances."""
+
+    @staticmethod
+    def create_executor(
+        settings: Optional[Settings] = None,
+        enclave_client: Optional[IEnclaveClient] = None,
+        middleware_client: Optional[IMiddlewareClient] = None
+    ) -> IExecutor:
+        """
+        Create a job executor with all dependencies.
+
+        Args:
+            settings: Settings instance (uses default if None)
+            enclave_client: Pre-configured enclave client (creates new if None)
+            middleware_client: Pre-configured middleware client (creates new if None)
+
+        Returns:
+            Configured job executor
+        """
+        if settings is None:
+            settings = get_settings()
+
+        try:
+            if enclave_client is None:
+                enclave_client = EnclaveClientFactory.create_client(settings)
+
+            if middleware_client is None:
+                middleware_client = MiddlewareClientFactory.create_client(settings)
+
+            logger.info("Creating SecureExecutor with configured dependencies")
+            logger.info(f"  - Enclave client: {type(enclave_client).__name__}")
+            if middleware_client:
+                logger.info(f"  - Middleware client: {type(middleware_client).__name__}")
+            else:
+                logger.info("  - Middleware client: disabled")
+
+            return SecureExecutor(
+                enclave_client=enclave_client,
+                settings=settings,
+                middleware_client=middleware_client
+            )
+
+        except Exception as e:
+            raise ConfigurationError(f"Failed to create executor: {e}")

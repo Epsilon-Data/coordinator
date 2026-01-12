@@ -69,3 +69,5 @@ htmlcov/
 *.bak
 Tasks.md
 .claude
+/workers/executor/enclave_app/
+/workers/enclave/

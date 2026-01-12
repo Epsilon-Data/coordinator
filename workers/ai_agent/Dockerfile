@@ -4,7 +4,6 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     git \
     build-essential \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,16 +13,11 @@ COPY pyproject.toml .
 COPY shared ./shared/
 COPY workers ./workers/
 
-# Install package with executor worker dependencies
-RUN pip install --no-cache-dir -e .[executor]
-
-# Create necessary directories
-RUN mkdir -p /app/logs /app/artifacts /app/repositories
+# Install package with ai-agent worker dependencies
+RUN pip install --no-cache-dir -e .[ai-agent]
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV ENVIRONMENT=production
-ENV ENCLAVE_DEBUG=false
 
 # Run the worker
-CMD ["python", "-m", "workers.executor.worker"]
+CMD ["python", "-m", "workers.ai_agent.ai_agent_worker"]
