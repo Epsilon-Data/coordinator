@@ -1,82 +1,7 @@
 version: '3.8'
 
 services:
-  # Clone Worker - Database polling only
-  clone-worker:
-    build:
-      context: .
-      dockerfile: workers/clone/Dockerfile
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      SHARED_STORAGE_PATH: /shared/epsilon
-      WORKER_NAME: CloneWorker
-      WORKER_CONCURRENCY: 2
-      JOB_FETCH_MODE: polling
-      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
-      AI_AGENT_ENABLED: ${AI_AGENT_ENABLED}
-    volumes:
-      - shared_storage:/shared/epsilon
-    networks:
-      - epsilon-network
-    restart: unless-stopped
-
-#  # AI Agent Worker with CrewAI - Database polling only
-#  ai-agent-worker:
-#    build:
-#      context: .
-#      dockerfile: workers/ai_agent/Dockerfile
-#    environment:
-#      DATABASE_URL: ${DATABASE_URL}
-#      SHARED_STORAGE_PATH: /shared/epsilon
-#      WORKER_NAME: AIAgentWorker
-#      WORKER_CONCURRENCY: 1
-#      OPENAI_API_KEY: ${OPENAI_API_KEY}
-#      PYTHONPATH: /app:/app/workers/ai_agent
-#      JOB_FETCH_MODE: polling
-#      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
-#    volumes:
-#      - shared_storage:/shared/epsilon
-#      - ../sdk-epsilon/archetypes:/app/sdk-epsilon/archetypes:ro
-#    networks:
-#      - epsilon-network
-#    restart: unless-stopped
-
-  # Execute Worker - Database polling with configurable enclave mode
-  executor-worker:
-    build:
-      context: .
-      dockerfile: workers/executor/Dockerfile
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      SHARED_STORAGE_PATH: /shared/epsilon
-      WORKER_NAME: ExecuteWorker
-      WORKER_CONCURRENCY: 1
-      JOB_FETCH_MODE: polling
-      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
-      # AWS Configuration
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
-      AWS_KMS_KEY_ARN: ${AWS_KMS_KEY_ARN}
-      AWS_KMS_KEY_ID: ${AWS_KMS_KEY_ARN}
-      AWS_REGION: ${KMS_REGION:-ap-southeast-2}
-      KMS_REGION: ${KMS_REGION:-ap-southeast-2}
-      S3_BUCKET: ${S3_BUCKET:-epsilon-datasets}
-      # Middleware endpoint for data fetching
-      # Use host.docker.internal to access host machine from inside Docker
-      MIDDLEWARE_ENDPOINT_URL: ${MIDDLEWARE_ENDPOINT_URL:-http://host.docker.internal:8001}
-      # Enclave Mode: Set to 'true' for local simulation, 'false' for real Nitro Enclaves
-      USE_LOCAL_ENCLAVE: ${USE_LOCAL_ENCLAVE:-true}
-    volumes:
-      - shared_storage:/shared/epsilon
-      # Mount Nitro CLI for production enclave mode
-      - /usr/bin/nitro-cli:/usr/bin/nitro-cli:ro
-      - /var/run/nitro_enclaves:/var/run/nitro_enclaves
-    networks:
-      - epsilon-network
-    restart: unless-stopped
-
-  # Job Fetcher Worker - Database polling only
+  # Job Fetcher Worker - Database polling only (pending → queued)
   job-fetcher-worker:
     build:
       context: .
@@ -89,6 +14,145 @@ services:
     networks:
       - epsilon-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "from shared.db import db; db.engine.connect()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Clone Worker - Database polling only (queued → cloned)
+  clone-worker:
+    build:
+      context: .
+      dockerfile: workers/clone/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SHARED_STORAGE_PATH: /shared/epsilon
+      WORKER_NAME: CloneWorker
+      WORKER_CONCURRENCY: 2
+      JOB_FETCH_MODE: polling
+      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
+      AI_AGENT_ENABLED: ${AI_AGENT_ENABLED:-false}
+    volumes:
+      - shared_storage:/shared/epsilon
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    depends_on:
+      job-fetcher-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from shared.db import db; db.engine.connect()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+#  # AI Agent Worker with CrewAI - Database polling only (cloned → ai_approved/ai_rejected)
+#  ai-agent-worker:
+#    build:
+#      context: .
+#      dockerfile: workers/ai_agent/Dockerfile
+#    environment:
+#      DATABASE_URL: ${DATABASE_URL}
+#      SHARED_STORAGE_PATH: /shared/epsilon
+#      WORKER_NAME: AIAgentWorker
+#      WORKER_CONCURRENCY: 1
+#      OPENAI_API_KEY: ${OPENAI_API_KEY}
+#      PYTHONPATH: /app
+#      JOB_FETCH_MODE: polling
+#      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
+#    volumes:
+#      - shared_storage:/shared/epsilon
+#    networks:
+#      - epsilon-network
+#    restart: unless-stopped
+#    depends_on:
+#      clone-worker:
+#        condition: service_healthy
+#    healthcheck:
+#      test: ["CMD", "python", "-c", "from shared.db import db; db.engine.connect()"]
+#      interval: 30s
+#      timeout: 10s
+#      retries: 3
+#      start_period: 10s
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 2G
+#    logging:
+#      driver: "json-file"
+#      options:
+#        max-size: "50m"
+#        max-file: "5"
+
+  # Executor Worker - Database polling with local enclave mode (cloned → completed/failed)
+  executor-worker:
+    build:
+      context: .
+      dockerfile: workers/executor/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SHARED_STORAGE_PATH: /shared/epsilon
+      WORKER_NAME: ExecutorWorker
+      WORKER_CONCURRENCY: 1
+      JOB_FETCH_MODE: polling
+      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
+      # AWS Configuration
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_KMS_KEY_ARN: ${AWS_KMS_KEY_ARN}
+      AWS_REGION: ${KMS_REGION:-ap-southeast-2}
+      KMS_REGION: ${KMS_REGION:-ap-southeast-2}
+      S3_BUCKET: ${S3_BUCKET:-epsilon-datasets}
+      # Middleware endpoint for data fetching
+      MIDDLEWARE_ENDPOINT_URL: ${MIDDLEWARE_ENDPOINT_URL:-http://host.docker.internal:8001}
+      MIDDLEWARE_TIMEOUT_SECONDS: ${MIDDLEWARE_TIMEOUT_SECONDS:-60}
+      # Enclave Mode: 'true' for local simulation, 'false' for real Nitro Enclaves
+      USE_LOCAL_ENCLAVE: ${USE_LOCAL_ENCLAVE:-true}
+    volumes:
+      - shared_storage:/shared/epsilon
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    depends_on:
+      clone-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from shared.db import db; db.engine.connect()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   shared_storage:
