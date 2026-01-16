@@ -45,8 +45,13 @@ ai-agent = [
     "requests>=2.31.0",
 ]
 
-# All workers combined
+# Production workers (without AI agent)
 all = [
+    "epsilon-coordinator[executor]",
+]
+
+# All workers including AI agent (heavy dependencies)
+all-with-ai = [
     "epsilon-coordinator[executor]",
     "epsilon-coordinator[ai-agent]",
 ]
