@@ -1,5 +1,3 @@
-version: '3.8'
-
 # =============================================================================
 # Epsilon Coordinator - Production Docker Compose
 # Single image, multiple services architecture
@@ -10,10 +8,7 @@ services:
   # Job Fetcher Worker - Polls for pending jobs (pending → queued)
   # ---------------------------------------------------------------------------
   job-fetcher:
-    image: ${DOCKER_REGISTRY:-ghcr.io/Epsilon-Data}/epsilon-coordinator:${VERSION:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/epsilon-data/coordinator:${VERSION:-latest}
     environment:
       WORKER_MODE: fetcher
       DATABASE_URL: ${DATABASE_URL}
@@ -38,10 +33,7 @@ services:
   # Clone Worker - Clones repositories (queued → cloned)
   # ---------------------------------------------------------------------------
   clone-worker:
-    image: ${DOCKER_REGISTRY:-ghcr.io/Epsilon-Data}/epsilon-coordinator:${VERSION:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/epsilon-data/coordinator:${VERSION:-latest}
     environment:
       WORKER_MODE: clone
       DATABASE_URL: ${DATABASE_URL}
@@ -71,10 +63,7 @@ services:
   # Executor Worker - Executes in TEE (cloned/ai_approved → success/failed)
   # ---------------------------------------------------------------------------
   executor-worker:
-    image: ${DOCKER_REGISTRY:-ghcr.io/Epsilon-Data}/epsilon-coordinator:${VERSION:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/epsilon-data/coordinator:${VERSION:-latest}
     environment:
       WORKER_MODE: executor
       DATABASE_URL: ${DATABASE_URL}
