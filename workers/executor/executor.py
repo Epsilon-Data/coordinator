@@ -86,6 +86,10 @@ class SecureExecutor(IExecutor):
         except Exception as e:
             return self._handle_execution_error(job_id, e, start_time)
 
+        finally:
+            # Clean up to prevent memory leak
+            self.cleanup_environment(job_id)
+
     def _step_validate_build(self, job_id: str, repo_path: str) -> BuildConfig:
         """Step 1: Validate build folder."""
         self._log.info(job_id, "validation", "Validating build folder", progress=10)

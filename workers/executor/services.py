@@ -4,10 +4,10 @@ Services for executor worker: build validation, zipping, and cryptography.
 import os
 import base64
 import logging
-import tempfile
 import yaml
 import zipfile
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Set, Tuple
 
@@ -186,7 +186,7 @@ class ZipService:
         self.exclude_patterns = exclude_patterns or self.DEFAULT_EXCLUDES
 
     def zip_directory(self, directory_path: str) -> ZipResult:
-        """Create a ZIP archive of a directory."""
+        """Create a ZIP archive of a directory in memory (no temp file I/O)."""
         dir_path = Path(directory_path)
 
         if not dir_path.exists():
@@ -200,44 +200,38 @@ class ZipService:
         files_added = 0
         total_size = 0
 
-        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_file:
-            temp_path = temp_file.name
+        # Use in-memory buffer instead of temp file
+        buffer = BytesIO()
 
-        try:
-            with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for file_path in dir_path.rglob('*'):
-                    if file_path.is_file() and not self._should_exclude(file_path):
-                        try:
-                            arcname = file_path.relative_to(dir_path)
-                            file_size = file_path.stat().st_size
-                            zipf.write(file_path, arcname)
-                            files_added += 1
-                            total_size += file_size
-                            logger.debug(f"Added: {arcname} ({file_size} bytes)")
-                        except Exception as e:
-                            logger.warning(f"Failed to add {file_path}: {e}")
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in dir_path.rglob('*'):
+                if file_path.is_file() and not self._should_exclude(file_path):
+                    try:
+                        arcname = file_path.relative_to(dir_path)
+                        file_size = file_path.stat().st_size
+                        zipf.write(file_path, arcname)
+                        files_added += 1
+                        total_size += file_size
+                        logger.debug(f"Added: {arcname} ({file_size} bytes)")
+                    except Exception as e:
+                        logger.warning(f"Failed to add {file_path}: {e}")
 
-            with open(temp_path, 'rb') as f:
-                zip_data = f.read()
+        zip_data = buffer.getvalue()
 
-            result = ZipResult(
-                data=zip_data,
-                files_count=files_added,
-                original_size=total_size,
-                compressed_size=len(zip_data)
-            )
+        result = ZipResult(
+            data=zip_data,
+            files_count=files_added,
+            original_size=total_size,
+            compressed_size=len(zip_data)
+        )
 
-            logger.info(
-                f"ZIP created: {files_added} files, "
-                f"{total_size} bytes -> {len(zip_data)} bytes "
-                f"({result.compression_ratio:.1f}%)"
-            )
+        logger.info(
+            f"ZIP created: {files_added} files, "
+            f"{total_size} bytes -> {len(zip_data)} bytes "
+            f"({result.compression_ratio:.1f}%)"
+        )
 
-            return result
-
-        finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
+        return result
 
     def _should_exclude(self, file_path: Path) -> bool:
         for part in file_path.parts:

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import yaml
 import zipfile
 from pathlib import Path
@@ -30,6 +31,9 @@ VSOCK_TIMEOUT_SECONDS = 300
 VSOCK_RECV_BUFFER_BYTES = 4 * 1024 * 1024
 HEALTH_CHECK_TIMEOUT_SECONDS = 5
 HTTP_ERROR_THRESHOLD = 400
+HTTP_RETRY_STATUS_CODES = {502, 503, 504}
+HTTP_MAX_RETRIES = 3
+HTTP_RETRY_BASE_DELAY = 1.0  # seconds
 
 # Script execution constants
 SCRIPT_TIMEOUT_SECONDS = 60
@@ -126,10 +130,11 @@ class EnclaveClient(IEnclaveClient):
             sock.connect((self.enclave_cid, self._settings.enclave.vsock_port))
 
             request_json = json.dumps(request_data)
-            sock.send(request_json.encode())
+            sock.sendall(request_json.encode())
 
-            response_data = sock.recv(VSOCK_RECV_BUFFER_BYTES).decode()
-            response = json.loads(response_data)
+            # Chunked receive to handle large responses
+            response_data = self._recv_all(sock)
+            response = json.loads(response_data.decode())
 
             sock.close()
             return response
@@ -137,6 +142,22 @@ class EnclaveClient(IEnclaveClient):
         except Exception as e:
             logger.error(f"[VSOCK] Failed: {str(e)}", exc_info=True)
             raise
+
+    def _recv_all(self, sock: socket.socket) -> bytes:
+        """Receive complete response with chunked reading."""
+        chunks = []
+        while True:
+            try:
+                chunk = sock.recv(65536)  # 64KB chunks
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            except socket.timeout:
+                # If we have data and timeout, assume complete
+                if chunks:
+                    break
+                raise
+        return b''.join(chunks)
 
     def _get_enclave_cid(self) -> int:
         """Get the CID of the running enclave."""
@@ -366,57 +387,79 @@ class MiddlewareClient(IMiddlewareClient):
         logger.info(f"[MIDDLEWARE] Initialized with endpoint: {self._endpoint_url}")
 
     def fetch_encrypted_csv(self, request: MiddlewareRequest) -> MiddlewareResponse:
-        """Fetch encrypted CSV from middleware via HTTP POST."""
-        try:
-            url = f"{self._endpoint_url}/fetch-csv"
-            logger.info(f"[MIDDLEWARE] POST {url}")
-            logger.info(f"[MIDDLEWARE] Dataset: {request.dataset_id}, Archetype: {request.archetype_id}")
+        """Fetch encrypted CSV from middleware via HTTP POST with retry logic."""
+        url = f"{self._endpoint_url}/fetch-csv"
+        logger.info(f"[MIDDLEWARE] POST {url}")
+        logger.info(f"[MIDDLEWARE] Dataset: {request.dataset_id}, Archetype: {request.archetype_id}")
 
-            payload = {
-                'dataset_id': request.dataset_id,
-                'archetype_id': request.archetype_id,
-                'public_key': request.public_key or '',
-            }
+        payload = {
+            'dataset_id': request.dataset_id,
+            'archetype_id': request.archetype_id,
+            'public_key': request.public_key or '',
+        }
 
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=self._timeout,
-                headers={'Content-Type': 'application/json'}
-            )
+        last_error = None
 
-            if response.status_code >= HTTP_ERROR_THRESHOLD:
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get('error', f"HTTP {response.status_code}")
-                logger.error(f"[MIDDLEWARE] Error: {error_msg}")
-                return MiddlewareResponse(success=False, error=error_msg)
+        for attempt in range(HTTP_MAX_RETRIES):
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=self._timeout,
+                    headers={'Content-Type': 'application/json'}
+                )
 
-            data = response.json()
+                # Check for retryable status codes (502, 503, 504)
+                if response.status_code in HTTP_RETRY_STATUS_CODES:
+                    delay = HTTP_RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        f"[MIDDLEWARE] HTTP {response.status_code}, retrying in {delay:.1f}s "
+                        f"(attempt {attempt + 1}/{HTTP_MAX_RETRIES})"
+                    )
+                    time.sleep(delay)
+                    continue
 
-            if not data.get('success'):
-                return MiddlewareResponse(success=False, error=data.get('error', 'Unknown error'))
+                if response.status_code >= HTTP_ERROR_THRESHOLD:
+                    error_data = response.json() if response.content else {}
+                    error_msg = error_data.get('error', f"HTTP {response.status_code}")
+                    logger.error(f"[MIDDLEWARE] Error: {error_msg}")
+                    return MiddlewareResponse(success=False, error=error_msg)
 
-            encrypted_csv = data.get('csv', '')
-            logger.info(f"[MIDDLEWARE] Received encrypted CSV ({len(encrypted_csv)} chars)")
+                data = response.json()
 
-            return MiddlewareResponse(
-                success=True,
-                encrypted_csv=encrypted_csv,
-                csv_metadata=data.get('metadata', {}),
-                request_id=response.headers.get('X-Request-ID', 'http-request')
-            )
+                if not data.get('success'):
+                    return MiddlewareResponse(success=False, error=data.get('error', 'Unknown error'))
 
-        except requests.exceptions.Timeout:
-            logger.error(f"[MIDDLEWARE] Timeout after {self._timeout}s")
-            return MiddlewareResponse(success=False, error=f"Request timeout after {self._timeout}s")
+                encrypted_csv = data.get('csv', '')
+                logger.info(f"[MIDDLEWARE] Received encrypted CSV ({len(encrypted_csv)} chars)")
 
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"[MIDDLEWARE] Connection error: {e}")
-            return MiddlewareResponse(success=False, error=f"Cannot connect to middleware at {self._endpoint_url}")
+                return MiddlewareResponse(
+                    success=True,
+                    encrypted_csv=encrypted_csv,
+                    csv_metadata=data.get('metadata', {}),
+                    request_id=response.headers.get('X-Request-ID', 'http-request')
+                )
 
-        except Exception as e:
-            logger.error(f"[MIDDLEWARE] Error: {e}", exc_info=True)
-            return MiddlewareResponse(success=False, error=str(e))
+            except requests.exceptions.Timeout:
+                last_error = f"Request timeout after {self._timeout}s"
+                logger.warning(f"[MIDDLEWARE] Timeout (attempt {attempt + 1}/{HTTP_MAX_RETRIES})")
+
+            except requests.exceptions.ConnectionError as e:
+                last_error = f"Cannot connect to middleware at {self._endpoint_url}"
+                delay = HTTP_RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"[MIDDLEWARE] Connection error, retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 1}/{HTTP_MAX_RETRIES}): {e}"
+                )
+                time.sleep(delay)
+
+            except Exception as e:
+                logger.error(f"[MIDDLEWARE] Error: {e}", exc_info=True)
+                return MiddlewareResponse(success=False, error=str(e))
+
+        # All retries exhausted
+        logger.error(f"[MIDDLEWARE] All {HTTP_MAX_RETRIES} retries exhausted")
+        return MiddlewareResponse(success=False, error=last_error or "Request failed after retries")
 
     def health_check(self) -> bool:
         try:
