@@ -401,15 +401,29 @@ class MiddlewareClient(IMiddlewareClient):
             logger.info(f"[MIDDLEWARE] AWS Region: {self._aws_region}")
 
     def _sign_request(self, method: str, url: str, payload: dict) -> tuple:
+        logger.info(f"[MIDDLEWARE-AUTH] Starting SigV4 signing for {method} {url}")
 
         credentials = self._session.get_credentials()
 
         if not credentials:
+            logger.error("[MIDDLEWARE-AUTH] No AWS credentials available in boto3 session")
             raise RuntimeError("No AWS credentials available")
 
         # Use frozen credentials for EC2 instance role
         frozen_credentials = credentials.get_frozen_credentials()
+
+        # Log credential info (safely)
+        access_key = frozen_credentials.access_key
+        has_secret = bool(frozen_credentials.secret_key)
+        has_token = bool(frozen_credentials.token)
+        logger.info(f"[MIDDLEWARE-AUTH] Access Key: {access_key[:8]}...{access_key[-4:] if len(access_key) > 12 else ''}")
+        logger.info(f"[MIDDLEWARE-AUTH] Secret Key present: {has_secret}")
+        logger.info(f"[MIDDLEWARE-AUTH] Session Token present: {has_token}")
+        logger.info(f"[MIDDLEWARE-AUTH] Signing region: {self._aws_region}")
+        logger.info(f"[MIDDLEWARE-AUTH] Service: lambda")
+
         body = json.dumps(payload)
+        logger.debug(f"[MIDDLEWARE-AUTH] Request body length: {len(body)} bytes")
 
         # Create AWS request
         aws_request = AWSRequest(
@@ -423,7 +437,20 @@ class MiddlewareClient(IMiddlewareClient):
         SigV4Auth(frozen_credentials, "lambda", self._aws_region).add_auth(aws_request)
 
         prepared = aws_request.prepare()
-        return prepared.url, prepared.body, dict(prepared.headers)
+        signed_headers = dict(prepared.headers)
+
+        # Log signed headers (partial for security)
+        logger.info("[MIDDLEWARE-AUTH] Signed request headers:")
+        for key, value in signed_headers.items():
+            if key.lower() == 'authorization':
+                # Show only the beginning of auth header
+                logger.info(f"  {key}: {value[:80]}...")
+            elif key.lower() == 'x-amz-security-token':
+                logger.info(f"  {key}: {value[:20]}...{value[-10:]}")
+            else:
+                logger.info(f"  {key}: {value}")
+
+        return prepared.url, prepared.body, signed_headers
 
     def fetch_encrypted_csv(self, request: MiddlewareRequest) -> MiddlewareResponse:
         url = self._endpoint_url
@@ -471,9 +498,34 @@ class MiddlewareClient(IMiddlewareClient):
                     continue
 
                 if response.status_code >= HTTP_ERROR_THRESHOLD:
-                    error_data = response.json() if response.content else {}
-                    error_msg = error_data.get('error', f"HTTP {response.status_code}")
-                    logger.error(f"[MIDDLEWARE] Error: {error_msg}")
+                    # Detailed error logging for debugging
+                    logger.error(f"[MIDDLEWARE-ERROR] HTTP {response.status_code} received")
+                    logger.error(f"[MIDDLEWARE-ERROR] Response headers:")
+                    for key, value in response.headers.items():
+                        logger.error(f"  {key}: {value}")
+                    logger.error(f"[MIDDLEWARE-ERROR] Response body: {response.text[:1000]}")
+
+                    # Parse error if JSON
+                    try:
+                        error_data = response.json() if response.content else {}
+                        error_msg = error_data.get('error') or error_data.get('message') or error_data.get('Message') or f"HTTP {response.status_code}"
+                        logger.error(f"[MIDDLEWARE-ERROR] Parsed error: {error_data}")
+                    except Exception:
+                        error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+
+                    # Specific 403 debugging
+                    if response.status_code == 403:
+                        logger.error("[MIDDLEWARE-ERROR] === 403 FORBIDDEN DEBUG ===")
+                        logger.error("[MIDDLEWARE-ERROR] Possible causes:")
+                        logger.error("  1. IAM role doesn't have lambda:InvokeFunctionUrl permission")
+                        logger.error("  2. Lambda resource-based policy doesn't allow this caller")
+                        logger.error("  3. SigV4 signature mismatch (wrong region, service, or credentials)")
+                        logger.error("  4. Request body changed after signing")
+                        logger.error("  5. Clock skew between EC2 and AWS (check system time)")
+                        logger.error(f"[MIDDLEWARE-ERROR] Mode: {self._mode}")
+                        logger.error(f"[MIDDLEWARE-ERROR] Endpoint: {self._endpoint_url}")
+                        logger.error(f"[MIDDLEWARE-ERROR] Region: {self._aws_region}")
+
                     return MiddlewareResponse(success=False, error=error_msg)
 
                 data = response.json()
