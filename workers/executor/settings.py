@@ -149,11 +149,12 @@ def validate_environment(settings: Settings) -> Tuple[bool, List[str]]:
     if not settings.aws.kms_key_arn and not settings.enclave.use_local_client:
         errors.append("AWS_KMS_KEY_ARN is required when not using local client")
 
-    if not settings.aws.access_key_id:
-        errors.append("AWS_ACCESS_KEY_ID is required")
-
-    if not settings.aws.secret_access_key:
-        errors.append("AWS_SECRET_ACCESS_KEY is required")
+    # AWS credentials: allow either explicit env vars OR EC2 instance role
+    # Only validate if explicit credentials are partially set (inconsistent config)
+    has_access_key = bool(settings.aws.access_key_id)
+    has_secret_key = bool(settings.aws.secret_access_key)
+    if has_access_key != has_secret_key:
+        errors.append("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set or both be empty (for instance role)")
 
     if not settings.enclave.use_local_client:
         eif_path = Path(settings.enclave.eif_path)
