@@ -68,6 +68,8 @@ class MiddlewareConfig:
     """Middleware configuration for CSV fetching."""
     endpoint_url: Optional[str] = field(default_factory=lambda: os.getenv('MIDDLEWARE_ENDPOINT_URL'))
     timeout_seconds: int = field(default_factory=lambda: int(os.getenv('MIDDLEWARE_TIMEOUT_SECONDS', '60')))
+    mode: str = field(default_factory=lambda: os.getenv('MIDDLEWARE_MODE', 'local'))  # "aws" or "local"
+    aws_region: str = field(default_factory=lambda: os.getenv('AWS_REGION', 'ap-southeast-2'))
 
     @property
     def is_configured(self) -> bool:

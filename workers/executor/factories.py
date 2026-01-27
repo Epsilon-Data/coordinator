@@ -73,7 +73,13 @@ class MiddlewareClientFactory:
             )
 
         logger.info(f"[MIDDLEWARE] Using endpoint: {middleware_config.endpoint_url}")
-        return MiddlewareClient(settings, middleware_config.endpoint_url)
+        logger.info(f"[MIDDLEWARE] Mode: {middleware_config.mode}")
+        return MiddlewareClient(
+            settings=settings,
+            endpoint_url=middleware_config.endpoint_url,
+            aws_region=middleware_config.aws_region,
+            mode=middleware_config.mode
+        )
 
 
 class ExecutorFactory:

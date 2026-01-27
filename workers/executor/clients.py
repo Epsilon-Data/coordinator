@@ -13,7 +13,10 @@ import zipfile
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+import boto3
 import requests
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
 from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse
@@ -373,22 +376,57 @@ class EnclaveClientLocal(IEnclaveClient):
 # Middleware Client
 # =============================================================================
 class MiddlewareClient(IMiddlewareClient):
-    """HTTP client for middleware."""
-
-    def __init__(self, settings=None, endpoint_url: Optional[str] = None):
-
+    def __init__(
+        self,
+        settings=None,
+        endpoint_url: Optional[str] = None,
+        aws_region: str = "ap-southeast-2",
+        mode: str = "local"  # "aws" or "local"
+    ):
         self._settings = settings or get_settings()
         self._endpoint_url = endpoint_url or self._settings.middleware.endpoint_url
         self._timeout = self._settings.middleware.timeout_seconds
+        self._aws_region = aws_region
+        self._mode = mode
 
         if self._endpoint_url:
             self._endpoint_url = self._endpoint_url.rstrip('/')
 
+        # Only initialize boto3 session for AWS mode
+        self._session = boto3.Session() if self._mode == "aws" else None
+
         logger.info(f"[MIDDLEWARE] Initialized with endpoint: {self._endpoint_url}")
+        logger.info(f"[MIDDLEWARE] Mode: {self._mode}")
+        if self._mode == "aws":
+            logger.info(f"[MIDDLEWARE] AWS Region: {self._aws_region}")
+
+    def _sign_request(self, method: str, url: str, payload: dict) -> tuple:
+
+        credentials = self._session.get_credentials()
+
+        if not credentials:
+            raise RuntimeError("No AWS credentials available")
+
+        # Use frozen credentials for EC2 instance role
+        frozen_credentials = credentials.get_frozen_credentials()
+        body = json.dumps(payload)
+
+        # Create AWS request
+        aws_request = AWSRequest(
+            method=method,
+            url=url,
+            data=body,
+            headers={"Content-Type": "application/json"}
+        )
+
+        # Sign with SigV4 for Lambda service
+        SigV4Auth(frozen_credentials, "lambda", self._aws_region).add_auth(aws_request)
+
+        prepared = aws_request.prepare()
+        return prepared.url, prepared.body, dict(prepared.headers)
 
     def fetch_encrypted_csv(self, request: MiddlewareRequest) -> MiddlewareResponse:
-        """Fetch encrypted CSV from middleware via HTTP POST with retry logic."""
-        url = f"{self._endpoint_url}/fetch-csv"
+        url = self._endpoint_url
         logger.info(f"[MIDDLEWARE] POST {url}")
         logger.info(f"[MIDDLEWARE] Dataset: {request.dataset_id}, Archetype: {request.archetype_id}")
 
@@ -402,12 +440,25 @@ class MiddlewareClient(IMiddlewareClient):
 
         for attempt in range(HTTP_MAX_RETRIES):
             try:
-                response = requests.post(
-                    url,
-                    json=payload,
-                    timeout=self._timeout,
-                    headers={'Content-Type': 'application/json'}
-                )
+                if self._mode == "aws":
+                    # Sign the request with AWS SigV4
+                    signed_url, signed_body, signed_headers = self._sign_request("POST", url, payload)
+                    logger.debug(f"[MIDDLEWARE] Request signed with SigV4")
+                    response = requests.post(
+                        signed_url,
+                        data=signed_body,
+                        timeout=self._timeout,
+                        headers=signed_headers
+                    )
+                else:
+                    # Local mode: simple HTTP POST
+                    logger.debug(f"[MIDDLEWARE] Local mode request")
+                    response = requests.post(
+                        url,
+                        json=payload,
+                        timeout=self._timeout,
+                        headers={"Content-Type": "application/json"}
+                    )
 
                 # Check for retryable status codes (502, 503, 504)
                 if response.status_code in HTTP_RETRY_STATUS_CODES:
@@ -463,8 +514,27 @@ class MiddlewareClient(IMiddlewareClient):
 
     def health_check(self) -> bool:
         try:
-            url = f"{self._endpoint_url}/health"
-            response = requests.get(url, timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
+            url = self._endpoint_url
+
+            if self._mode == "aws":
+                credentials = self._session.get_credentials()
+                if not credentials:
+                    return False
+
+                frozen_credentials = credentials.get_frozen_credentials()
+                aws_request = AWSRequest(method="GET", url=url, headers={})
+                SigV4Auth(frozen_credentials, "lambda", self._aws_region).add_auth(aws_request)
+
+                prepared = aws_request.prepare()
+                response = requests.get(
+                    prepared.url,
+                    timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
+                    headers=dict(prepared.headers)
+                )
+            else:
+                # Local mode: simple HTTP GET
+                response = requests.get(url, timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
+
             return response.status_code == 200
         except Exception as e:
             logger.warning(f"[MIDDLEWARE] Health check failed: {e}")
