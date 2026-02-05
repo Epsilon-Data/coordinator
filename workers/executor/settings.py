@@ -37,6 +37,9 @@ class EnclaveConfig:
     vsock_port: int = field(default_factory=lambda: int(os.getenv('VSOCK_PORT', '5005')))
     debug_mode: bool = field(default_factory=lambda: os.getenv('ENCLAVE_DEBUG', 'false').lower() == 'true')
     use_local_client: bool = field(default_factory=lambda: os.getenv('USE_LOCAL_ENCLAVE', 'false').lower() == 'true')
+    # External enclave mode: enclave is managed separately (not launched by executor)
+    use_external_enclave: bool = field(default_factory=lambda: os.getenv('USE_EXTERNAL_ENCLAVE', 'false').lower() == 'true')
+    external_enclave_cid: Optional[int] = field(default_factory=lambda: int(os.getenv('ENCLAVE_CID', '0')) if os.getenv('ENCLAVE_CID') else None)
 
 
 @dataclass
@@ -146,8 +149,14 @@ def validate_environment(settings: Settings) -> Tuple[bool, List[str]]:
     """Validate the environment configuration."""
     errors = []
 
-    if not settings.aws.kms_key_arn and not settings.enclave.use_local_client:
-        errors.append("AWS_KMS_KEY_ARN is required when not using local client")
+    # Skip KMS and EIF validation for local client or external enclave mode
+    skip_enclave_validation = (
+        settings.enclave.use_local_client or
+        settings.enclave.use_external_enclave
+    )
+
+    if not settings.aws.kms_key_arn and not skip_enclave_validation:
+        errors.append("AWS_KMS_KEY_ARN is required when not using local client or external enclave")
 
     # AWS credentials: allow either explicit env vars OR EC2 instance role
     # Only validate if explicit credentials are partially set (inconsistent config)
@@ -156,10 +165,14 @@ def validate_environment(settings: Settings) -> Tuple[bool, List[str]]:
     if has_access_key != has_secret_key:
         errors.append("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set or both be empty (for instance role)")
 
-    if not settings.enclave.use_local_client:
+    if not skip_enclave_validation:
         eif_path = Path(settings.enclave.eif_path)
         if not eif_path.exists():
             errors.append(f"Enclave EIF file not found: {settings.enclave.eif_path}")
+
+    # Validate external enclave CID is set when using external mode
+    if settings.enclave.use_external_enclave and not settings.enclave.external_enclave_cid:
+        errors.append("ENCLAVE_CID is required when using external enclave mode")
 
     storage_path = Path(settings.storage.shared_storage_path)
     if not storage_path.exists():

@@ -55,8 +55,10 @@ class EnclaveClient(IEnclaveClient):
 
         self._settings = get_settings()
         self._crypto = CryptoService()
-        self.enclave_cid = enclave_cid or self._get_enclave_cid()
+        # Use provided CID, or external CID from settings, or auto-detect
+        self.enclave_cid = enclave_cid or self._settings.enclave.external_enclave_cid or self._get_enclave_cid()
         self._connected = True
+        logger.info(f"[ENCLAVE] Initialized with CID: {self.enclave_cid}")
 
     def get_public_key(self, job_id: str) -> Tuple[str, str]:
         """Get public key from enclave for encryption."""
@@ -527,6 +529,13 @@ class MiddlewareClient(IMiddlewareClient):
                         logger.error(f"[MIDDLEWARE-ERROR] Region: {self._aws_region}")
 
                     return MiddlewareResponse(success=False, error=error_msg)
+
+                # Check for empty response body
+                if not response.content:
+                    logger.error(f"[MIDDLEWARE] Empty response body (HTTP {response.status_code})")
+                    return MiddlewareResponse(success=False, error=f"Empty response from middleware (HTTP {response.status_code})")
+
+                logger.info(f"[MIDDLEWARE] Response status: {response.status_code}, body length: {len(response.content)} bytes")
 
                 data = response.json()
 
