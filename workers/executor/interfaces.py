@@ -87,8 +87,8 @@ class IEnclaveClient(ABC):
         session_id: str,
         encrypted_zip: str,
         encrypted_csv: Optional[str] = None
-    ) -> Tuple[bool, str]:
-        """Send encrypted data to enclave. Returns (success, output/error)."""
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Send encrypted data to enclave. Returns (success, output/error, attestation)."""
         pass
 
     @abstractmethod

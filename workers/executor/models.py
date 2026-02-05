@@ -48,6 +48,7 @@ class ExecutionResult(BaseModel):
     artifacts: List[str] = Field(default_factory=list, description="Generated artifact paths")
     logs: Optional[str] = Field(default=None, description="Execution logs")
     enclave_cid: Optional[int] = Field(default=None, description="Enclave CID used")
+    attestation: Optional[Dict[str, Any]] = Field(default=None, description="Enclave attestation document")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     model_config = {"frozen": False, "extra": "ignore"}
@@ -73,6 +74,7 @@ class ExecutionResult(BaseModel):
             "artifacts": self.artifacts,
             "logs": self.logs,
             "enclave_cid": self.enclave_cid,
+            "attestation": self.attestation,
             "timestamp": self.timestamp.isoformat(),
             "execution_type": "nitro_enclave",
         }

@@ -94,8 +94,12 @@ class EnclaveClient(IEnclaveClient):
         session_id: str,
         encrypted_zip: str,
         encrypted_csv: Optional[str] = None
-    ) -> Tuple[bool, str]:
-        """Send encrypted data to enclave for execution."""
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Send encrypted data to enclave for execution.
+
+        Returns:
+            Tuple of (success, output, attestation_data)
+        """
         try:
             logger.info(f"[ENCLAVE] Sending data to enclave, session: {session_id[:20]}...")
 
@@ -112,15 +116,26 @@ class EnclaveClient(IEnclaveClient):
 
             if response.get('success'):
                 logger.info(f"[ENCLAVE] Execution successful")
-                return True, response.get('output', '')
+
+                # Extract attestation data
+                attestation = response.get('attestation')
+                enclave_proof = response.get('enclave_proof', {})
+
+                if attestation:
+                    logger.info(f"[ENCLAVE] Attestation received: {attestation.get('attestation', {}).get('attestation_document_length', 0)} bytes")
+                    logger.info(f"[ENCLAVE] Enclave proof: ran_in_enclave={enclave_proof.get('ran_in_enclave')}, attestation_available={enclave_proof.get('attestation_available')}")
+                else:
+                    logger.warning("[ENCLAVE] No attestation in response")
+
+                return True, response.get('output', ''), attestation
             else:
                 error_msg = response.get('error', 'Unknown error')
                 logger.error(f"[ENCLAVE] Execution failed: {error_msg}")
-                return False, error_msg
+                return False, error_msg, None
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Failed to send: {str(e)}", exc_info=True)
-            return False, str(e)
+            return False, str(e), None
 
     def _send_to_enclave(self, request_data: dict) -> dict:
         """Send request to enclave via VSock."""
@@ -245,12 +260,16 @@ class EnclaveClientLocal(IEnclaveClient):
         session_id: str,
         encrypted_zip: str,
         encrypted_csv: Optional[str] = None
-    ) -> Tuple[bool, str]:
-        """Execute encrypted payloads with Zero Trust decryption."""
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Execute encrypted payloads with Zero Trust decryption.
+
+        Returns:
+            Tuple of (success, output, attestation_data) - attestation is None for local mode
+        """
         logger.info(f"[ENCLAVE] Starting Zero Trust execution (session: {session_id[:20]}...)")
 
         if session_id not in self._sessions:
-            return False, f"Session not found: {session_id}"
+            return False, f"Session not found: {session_id}", None
 
         private_key = self._sessions[session_id]
 
@@ -266,11 +285,12 @@ class EnclaveClientLocal(IEnclaveClient):
             output = self._execute_script(decrypted_zip, decrypted_csv)
             logger.info("[ENCLAVE] Execution completed successfully")
 
-            return True, output
+            # Local mode doesn't have attestation
+            return True, output, None
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Execution failed: {e}", exc_info=True)
-            return False, str(e)
+            return False, str(e), None
 
         finally:
             self._sessions.pop(session_id, None)

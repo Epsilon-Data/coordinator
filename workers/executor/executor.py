@@ -74,11 +74,11 @@ class SecureExecutor(IExecutor):
             encrypted_zip = self._step_zip_and_encrypt(job_id, request.repo_path, public_key)
 
             # Step 5: Execute in enclave
-            success, output = self._step_execute_in_enclave(job_id, session_id, encrypted_zip, encrypted_csv)
+            success, output, attestation = self._step_execute_in_enclave(job_id, session_id, encrypted_zip, encrypted_csv)
 
             # Build result
             execution_time = time.time() - start_time
-            return self._create_result(job_id, success, output, execution_time)
+            return self._create_result(job_id, success, output, execution_time, attestation)
 
         except BuildValidationError as e:
             return self._handle_validation_error(job_id, e, start_time)
@@ -189,20 +189,25 @@ class SecureExecutor(IExecutor):
         self, job_id: str, session_id: str,
         encrypted_zip: str, encrypted_csv: Optional[str]
     ) -> tuple:
-        """Step 5: Execute in enclave."""
+        """Step 5: Execute in enclave. Returns (success, output, attestation)."""
         self._log.info(job_id, "enclave", "Sending to enclave for execution", progress=85)
 
         try:
-            success, output = self._enclave_client.send_encrypted_data_to_enclave(
+            success, output, attestation = self._enclave_client.send_encrypted_data_to_enclave(
                 session_id, encrypted_zip, encrypted_csv
             )
             logger.info(f"Enclave execution completed: success={success}")
-            return success, output
+            if attestation:
+                logger.info(f"Attestation received: {attestation.get('attestation', {}).get('attestation_document_length', 0)} bytes")
+            return success, output, attestation
         except Exception as e:
             self._log.error(job_id, "enclave", f"Enclave execution failed: {e}", error=e)
             raise
 
-    def _create_result(self, job_id: str, success: bool, output: str, execution_time: float) -> ExecutionResult:
+    def _create_result(
+        self, job_id: str, success: bool, output: str,
+        execution_time: float, attestation: Optional[Dict] = None
+    ) -> ExecutionResult:
         """Create execution result."""
         status = JobStatus.SUCCESS if success else JobStatus.FAILED
         result = ExecutionResult(
@@ -212,6 +217,7 @@ class SecureExecutor(IExecutor):
             output=output if success else None,
             error=output if not success else None,
             enclave_cid=getattr(self._enclave_client, 'enclave_cid', None),
+            attestation=attestation,
             timestamp=datetime.utcnow()
         )
 
