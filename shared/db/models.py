@@ -55,6 +55,7 @@ class JobRequest(Base):
     # Execution fields
     execution_output: Mapped[Optional[str]] = mapped_column(Text)
     error_message: Mapped[Optional[str]] = mapped_column(Text)
+    attestation: Mapped[Optional[str]] = mapped_column(Text)  # JSON: enclave attestation document
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -141,7 +141,8 @@ class JobRepository:
                 'ai_result_path': 'execution_output',  # Use execution_output for AI result path
                 'execution_result': 'execution_output',
                 'execution_result_path': 'execution_output',  # Use execution_output for result paths
-                'error_message': 'error_message'
+                'error_message': 'error_message',
+                'attestation': 'attestation'  # Enclave attestation document
             }
 
             for key, value in kwargs.items():
@@ -314,6 +315,7 @@ class JobRepository:
             'validation_decision': job.validation_decision,
             'execution_output': job.execution_output,
             'error_message': job.error_message,
+            'attestation': job.attestation,
             'created_at': job.created_at,
             'updated_at': job.updated_at,
             # Convenience properties

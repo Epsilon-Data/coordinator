@@ -121,9 +121,12 @@ class ExecutorWorker(ExecutorWorkerBase):
                 job_repository.update_job_status(
                     job_id=job_id,
                     status=JobStatus.SUCCESS.value,
-                    execution_result=result.output
+                    execution_result=result.output,
+                    attestation=result.attestation
                 )
                 logger.info(f"[SUCCESS] Job {job_id} completed")
+                if result.attestation:
+                    logger.info(f"[ATTESTATION] Stored attestation for job {job_id}")
                 return True
             elif result.status == JobStatus.REJECTED:
                 # Build validation failed - no build folder or invalid build.yml
