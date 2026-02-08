@@ -142,7 +142,9 @@ class JobRepository:
                 'execution_result': 'execution_output',
                 'execution_result_path': 'execution_output',  # Use execution_output for result paths
                 'error_message': 'error_message',
-                'attestation': 'attestation'  # Enclave attestation document
+                'attestation': 'attestation',  # Enclave attestation document
+                'verification_receipt': 'verification_receipt',  # Server-side verification result
+                'execution_metrics': 'execution_metrics'  # Per-step timing metrics
             }
 
             for key, value in kwargs.items():
@@ -316,6 +318,8 @@ class JobRepository:
             'execution_output': job.execution_output,
             'error_message': job.error_message,
             'attestation': job.attestation,
+            'verification_receipt': job.verification_receipt,
+            'execution_metrics': job.execution_metrics,
             'created_at': job.created_at,
             'updated_at': job.updated_at,
             # Convenience properties

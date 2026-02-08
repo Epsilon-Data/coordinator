@@ -49,6 +49,7 @@ class ExecutionResult(BaseModel):
     logs: Optional[str] = Field(default=None, description="Execution logs")
     enclave_cid: Optional[int] = Field(default=None, description="Enclave CID used")
     attestation: Optional[Dict[str, Any]] = Field(default=None, description="Enclave attestation document")
+    step_timing: Optional[Dict[str, Any]] = Field(default=None, description="Per-step execution timing metrics")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     model_config = {"frozen": False, "extra": "ignore"}
@@ -75,6 +76,7 @@ class ExecutionResult(BaseModel):
             "logs": self.logs,
             "enclave_cid": self.enclave_cid,
             "attestation": self.attestation,
+            "step_timing": self.step_timing,
             "timestamp": self.timestamp.isoformat(),
             "execution_type": "nitro_enclave",
         }

@@ -4,6 +4,8 @@ fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
 """
 import os
 import sys
+import json
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from shared.db import job_repository
@@ -46,6 +48,26 @@ class ExecutorWorker(ExecutorWorkerBase):
         logger = get_logger(__name__)
         logger.info(f"ExecutorWorker initialized for worker {self._settings.worker_id} in polling mode")
 
+        # Stamp boot_ready_at in boot_events table for boot time measurement
+        self._stamp_boot_ready()
+
+    def _stamp_boot_ready(self) -> None:
+        """Update the most recent boot_events row with boot_ready_at timestamp."""
+        try:
+            from shared.db import db
+            with db.get_session() as session:
+                session.execute(
+                    __import__('sqlalchemy').text(
+                        "UPDATE boot_events SET boot_ready_at = NOW(), "
+                        "boot_duration_ms = EXTRACT(EPOCH FROM (NOW() - boot_requested_at))::integer * 1000 "
+                        "WHERE id = (SELECT id FROM boot_events WHERE boot_ready_at IS NULL ORDER BY id DESC LIMIT 1)"
+                    )
+                )
+                session.commit()
+            get_logger(__name__).info("[BOOT] Stamped boot_ready_at in boot_events")
+        except Exception as e:
+            get_logger(__name__).debug(f"[BOOT] Could not stamp boot_ready_at: {e}")
+
     def _validate_environment(self) -> None:
         """Validate the runtime environment configuration."""
         logger = get_logger(__name__)
@@ -70,6 +92,62 @@ class ExecutorWorker(ExecutorWorkerBase):
         logger = get_logger(__name__)
         logger.info("Creating production executor")
         return ExecutorFactory.create_executor(self._settings)
+
+    def _verify_attestation(self, job_id: str, attestation: Any, logger) -> Optional[str]:
+        """Verify attestation document and return a JSON verification receipt."""
+        try:
+            from epsilon_verifier import verify_attestation
+
+            # Extract base64 attestation document from the stored JSON
+            att_doc = attestation
+            if isinstance(att_doc, str):
+                att_doc = json.loads(att_doc)
+
+            b64_doc = ""
+            if isinstance(att_doc, dict):
+                inner = att_doc.get("attestation", {})
+                if isinstance(inner, dict):
+                    b64_doc = inner.get("attestation_document", "")
+
+            if not b64_doc:
+                logger.warning(f"[ATTESTATION] No attestation_document found in attestation for {job_id}")
+                return json.dumps({
+                    "verified_at": datetime.now(timezone.utc).isoformat(),
+                    "valid": False,
+                    "error": "No attestation_document found in attestation payload",
+                })
+
+            vr = verify_attestation(
+                attestation_doc=b64_doc,
+                expected_pcr0=os.environ.get("EXPECTED_PCR0"),
+                expected_pcr1=os.environ.get("EXPECTED_PCR1"),
+                expected_pcr2=os.environ.get("EXPECTED_PCR2"),
+            )
+
+            return json.dumps({
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "valid": vr.valid,
+                "checks": {
+                    "syntax_valid": vr.syntax_valid,
+                    "certificate_chain_valid": vr.certificate_chain_valid,
+                    "signature_valid": vr.aws_signature_valid,
+                    "pcr_verified": vr.pcr_verified,
+                    "output_verified": vr.output_verified,
+                },
+                "pcrs": {"pcr0": vr.pcr0, "pcr1": vr.pcr1, "pcr2": vr.pcr2},
+                "module_id": vr.module_id,
+                "timestamp": vr.timestamp.isoformat() if vr.timestamp else None,
+                "verifier_version": "1.0.0",
+                "error": vr.error,
+                "timing": vr.timing,
+            })
+        except Exception as e:
+            logger.error(f"[ATTESTATION] Verification failed for {job_id}: {e}")
+            return json.dumps({
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "valid": False,
+                "error": str(e),
+            })
 
     def process_job(self, job: Dict[str, Any]) -> bool:
         """
@@ -118,15 +196,24 @@ class ExecutorWorker(ExecutorWorkerBase):
 
             # Update job status based on result
             if result.is_success:
+                # Verify attestation document if present
+                verification_receipt = None
+                if result.attestation:
+                    verification_receipt = self._verify_attestation(job_id, result.attestation, logger)
+
                 job_repository.update_job_status(
                     job_id=job_id,
                     status=JobStatus.SUCCESS.value,
                     execution_result=result.output,
-                    attestation=result.attestation
+                    attestation=result.attestation,
+                    verification_receipt=verification_receipt,
+                    execution_metrics=result.step_timing
                 )
                 logger.info(f"[SUCCESS] Job {job_id} completed")
                 if result.attestation:
                     logger.info(f"[ATTESTATION] Stored attestation for job {job_id}")
+                if verification_receipt:
+                    logger.info(f"[ATTESTATION] Verification receipt stored for job {job_id}")
                 return True
             elif result.status == JobStatus.REJECTED:
                 # Build validation failed - no build folder or invalid build.yml

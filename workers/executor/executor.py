@@ -57,28 +57,43 @@ class SecureExecutor(IExecutor):
         """Execute a job with Zero Trust security model."""
         start_time = time.time()
         job_id = request.job_id
+        step_timing = {}
 
         try:
             self._log.info(job_id, "execution", f"Starting execution for job {job_id}")
 
             # Step 1: Validate build
+            t0 = time.time()
             build_config = self._step_validate_build(job_id, request.repo_path)
+            step_timing['build_validation_ms'] = round((time.time() - t0) * 1000, 2)
 
             # Step 2: Get public key
+            t0 = time.time()
             public_key, session_id = self._step_get_public_key(job_id)
+            step_timing['get_public_key_ms'] = round((time.time() - t0) * 1000, 2)
 
             # Step 3: Fetch encrypted CSV
+            t0 = time.time()
             encrypted_csv = self._step_fetch_encrypted_csv(job_id, request, build_config, public_key)
+            step_timing['fetch_csv_ms'] = round((time.time() - t0) * 1000, 2)
 
             # Step 4: Zip and encrypt
+            t0 = time.time()
             encrypted_zip = self._step_zip_and_encrypt(job_id, request.repo_path, public_key)
+            step_timing['zip_and_encrypt_ms'] = round((time.time() - t0) * 1000, 2)
 
             # Step 5: Execute in enclave
-            success, output, attestation = self._step_execute_in_enclave(job_id, session_id, encrypted_zip, encrypted_csv)
+            t0 = time.time()
+            success, output, attestation, enclave_timing = self._step_execute_in_enclave(job_id, session_id, encrypted_zip, encrypted_csv)
+            step_timing['enclave_round_trip_ms'] = round((time.time() - t0) * 1000, 2)
+            if enclave_timing:
+                step_timing['enclave_internal'] = enclave_timing
 
             # Build result
             execution_time = time.time() - start_time
-            return self._create_result(job_id, success, output, execution_time, attestation)
+            step_timing['total_ms'] = round(execution_time * 1000, 2)
+            logger.info(f"[TIMING] job={job_id} {step_timing}")
+            return self._create_result(job_id, success, output, execution_time, attestation, step_timing)
 
         except BuildValidationError as e:
             return self._handle_validation_error(job_id, e, start_time)
@@ -189,7 +204,7 @@ class SecureExecutor(IExecutor):
         self, job_id: str, session_id: str,
         encrypted_zip: str, encrypted_csv: Optional[str]
     ) -> tuple:
-        """Step 5: Execute in enclave. Returns (success, output, attestation)."""
+        """Step 5: Execute in enclave. Returns (success, output, attestation, enclave_timing)."""
         self._log.info(job_id, "enclave", "Sending to enclave for execution", progress=85)
 
         try:
@@ -197,16 +212,21 @@ class SecureExecutor(IExecutor):
                 session_id, encrypted_zip, encrypted_csv
             )
             logger.info(f"Enclave execution completed: success={success}")
+            # Extract enclave-internal timing if available
+            enclave_timing = None
+            if isinstance(attestation, dict) and 'timing' in attestation:
+                enclave_timing = attestation.pop('timing')
             if attestation:
                 logger.info(f"Attestation received: {attestation.get('attestation', {}).get('attestation_document_length', 0)} bytes")
-            return success, output, attestation
+            return success, output, attestation, enclave_timing
         except Exception as e:
             self._log.error(job_id, "enclave", f"Enclave execution failed: {e}", error=e)
             raise
 
     def _create_result(
         self, job_id: str, success: bool, output: str,
-        execution_time: float, attestation: Optional[Dict] = None
+        execution_time: float, attestation: Optional[Dict] = None,
+        step_timing: Optional[Dict] = None
     ) -> ExecutionResult:
         """Create execution result."""
         status = JobStatus.SUCCESS if success else JobStatus.FAILED
@@ -218,6 +238,7 @@ class SecureExecutor(IExecutor):
             error=output if not success else None,
             enclave_cid=getattr(self._enclave_client, 'enclave_cid', None),
             attestation=attestation,
+            step_timing=step_timing,
             timestamp=datetime.utcnow()
         )
 

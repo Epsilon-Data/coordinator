@@ -127,6 +127,11 @@ class EnclaveClient(IEnclaveClient):
                 else:
                     logger.warning("[ENCLAVE] No attestation in response")
 
+                # Pass enclave-internal timing through in the attestation dict
+                enclave_timing = response.get('timing')
+                if enclave_timing and attestation is not None:
+                    attestation['timing'] = enclave_timing
+
                 return True, response.get('output', ''), attestation
             else:
                 error_msg = response.get('error', 'Unknown error')

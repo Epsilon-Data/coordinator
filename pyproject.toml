@@ -30,6 +30,7 @@ executor = [
     "requests>=2.31.0",
     "pyyaml>=6.0",
     "psutil>=5.9.0",
+    "epsilon-attestation-verifier>=1.0.0",
 ]
 
 # AI Agent worker
