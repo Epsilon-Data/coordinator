@@ -22,7 +22,7 @@ class TestSecureExecutor:
         client = MagicMock()
         client.get_public_key.return_value = ('-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----', 'session_123')
         client.encrypt_zip_data.return_value = 'encrypted_zip_base64'
-        client.send_encrypted_data_to_enclave.return_value = (True, 'Script output')
+        client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None)
         client.health_check.return_value = True
         client.enclave_cid = 999
         return client
@@ -33,6 +33,7 @@ class TestSecureExecutor:
         settings = MagicMock()
         settings.middleware = MagicMock()
         settings.middleware.endpoint_url = 'http://localhost:8001'
+        settings.middleware.use_direct_db = False
         return settings
 
     @pytest.fixture
@@ -43,6 +44,8 @@ class TestSecureExecutor:
         response.success = True
         response.encrypted_csv = 'encrypted_csv_base64'
         response.error = None
+        response.is_direct_db = False
+        response.mode = 'legacy'
         client.fetch_encrypted_csv.return_value = response
         return client
 
@@ -183,7 +186,7 @@ datasets: []
 
     def test_execute_enclave_failure(self, secure_executor, sample_request, mock_enclave_client):
         """Test handling of enclave execution failure."""
-        mock_enclave_client.send_encrypted_data_to_enclave.return_value = (False, 'Script failed')
+        mock_enclave_client.send_encrypted_data_to_enclave.return_value = (False, 'Script failed', None)
 
         result = secure_executor.execute(sample_request)
 
@@ -195,6 +198,7 @@ datasets: []
         response = MagicMock()
         response.success = False
         response.error = 'Dataset not found'
+        response.is_direct_db = False
         mock_middleware_client.fetch_encrypted_csv.return_value = response
 
         result = secure_executor.execute(sample_request)
@@ -208,6 +212,8 @@ datasets: []
         response.success = True
         response.encrypted_csv = ''
         response.error = None
+        response.is_direct_db = False
+        response.mode = 'legacy'
         mock_middleware_client.fetch_encrypted_csv.return_value = response
 
         result = secure_executor.execute(sample_request)
@@ -255,8 +261,8 @@ datasets: []
         assert session_id == 'session_123'
         mock_enclave_client.get_public_key.assert_called_once_with('JOB-123')
 
-    def test_step_fetch_encrypted_csv(self, secure_executor, sample_request, mock_middleware_client):
-        """Test encrypted CSV fetch step."""
+    def test_step_fetch_from_middleware(self, secure_executor, sample_request, mock_middleware_client):
+        """Test middleware fetch step (legacy mode)."""
         build_config = BuildConfig(
             version='1.0',
             script_file='main.py',
@@ -266,15 +272,15 @@ datasets: []
             environment='enclave'
         )
 
-        encrypted_csv = secure_executor._step_fetch_encrypted_csv(
+        response = secure_executor._step_fetch_from_middleware(
             'JOB-123', sample_request, build_config, 'public_key_pem'
         )
 
-        assert encrypted_csv == 'encrypted_csv_base64'
+        assert response.encrypted_csv == 'encrypted_csv_base64'
         mock_middleware_client.fetch_encrypted_csv.assert_called_once()
 
-    def test_step_fetch_encrypted_csv_no_datasets(self, secure_executor, sample_request):
-        """Test CSV fetch step skipped when no datasets."""
+    def test_step_fetch_from_middleware_no_datasets(self, secure_executor, sample_request):
+        """Test middleware fetch step skipped when no datasets."""
         build_config = BuildConfig(
             version='1.0',
             script_file='main.py',
@@ -284,7 +290,7 @@ datasets: []
             environment='enclave'
         )
 
-        result = secure_executor._step_fetch_encrypted_csv(
+        result = secure_executor._step_fetch_from_middleware(
             'JOB-123', sample_request, build_config, 'public_key_pem'
         )
 
@@ -302,7 +308,8 @@ datasets: []
 
     def test_step_execute_in_enclave(self, secure_executor, mock_enclave_client):
         """Test enclave execution step."""
-        success, output = secure_executor._step_execute_in_enclave(
+        mock_enclave_client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None)
+        success, output, attestation, enclave_timing = secure_executor._step_execute_in_enclave(
             'JOB-123', 'session_123', 'encrypted_zip', 'encrypted_csv'
         )
 

@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 from workers.executor.settings import Settings
-from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest
+from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse
 from workers.executor.models import JobExecutionRequest, ExecutionResult, BuildConfig, JobStatus
 from workers.executor.exceptions import BuildValidationError
 from workers.executor.services import BuildValidator, ZipService
@@ -72,19 +72,35 @@ class SecureExecutor(IExecutor):
             public_key, session_id = self._step_get_public_key(job_id)
             step_timing['get_public_key_ms'] = round((time.time() - t0) * 1000, 2)
 
-            # Step 3: Fetch encrypted CSV
+            # Determine mode based on feature flag
+            use_direct_db = self._settings.middleware.use_direct_db
+            mode = "direct_db" if use_direct_db else "legacy"
+
+            # Step 3: Fetch from middleware (mode-dependent)
             t0 = time.time()
-            encrypted_csv = self._step_fetch_encrypted_csv(job_id, request, build_config, public_key)
-            step_timing['fetch_csv_ms'] = round((time.time() - t0) * 1000, 2)
+            middleware_response = self._step_fetch_from_middleware(
+                job_id, request, build_config, public_key, mode
+            )
+            step_timing['fetch_middleware_ms'] = round((time.time() - t0) * 1000, 2)
 
             # Step 4: Zip and encrypt
             t0 = time.time()
             encrypted_zip = self._step_zip_and_encrypt(job_id, request.repo_path, public_key)
             step_timing['zip_and_encrypt_ms'] = round((time.time() - t0) * 1000, 2)
 
-            # Step 5: Execute in enclave
+            # Step 5: Execute in enclave (branch on mode)
             t0 = time.time()
-            success, output, attestation, enclave_timing = self._step_execute_in_enclave(job_id, session_id, encrypted_zip, encrypted_csv)
+            if middleware_response and middleware_response.is_direct_db:
+                success, output, attestation, enclave_timing = self._step_execute_in_enclave_db_fetch(
+                    job_id, session_id, encrypted_zip,
+                    middleware_response.encrypted_credentials,
+                    middleware_response.sql_query
+                )
+            else:
+                encrypted_csv = middleware_response.encrypted_csv if middleware_response else None
+                success, output, attestation, enclave_timing = self._step_execute_in_enclave(
+                    job_id, session_id, encrypted_zip, encrypted_csv
+                )
             step_timing['enclave_round_trip_ms'] = round((time.time() - t0) * 1000, 2)
             if enclave_timing:
                 step_timing['enclave_internal'] = enclave_timing
@@ -92,7 +108,7 @@ class SecureExecutor(IExecutor):
             # Build result
             execution_time = time.time() - start_time
             step_timing['total_ms'] = round(execution_time * 1000, 2)
-            logger.info(f"[TIMING] job={job_id} {step_timing}")
+            logger.info(f"[TIMING] job={job_id} mode={mode} {step_timing}")
             return self._create_result(job_id, success, output, execution_time, attestation, step_timing)
 
         except BuildValidationError as e:
@@ -134,16 +150,21 @@ class SecureExecutor(IExecutor):
             self._log.error(job_id, "enclave", f"Failed to get public key: {e}", error=e)
             raise
 
-    def _step_fetch_encrypted_csv(
+    def _step_fetch_from_middleware(
         self, job_id: str, request: JobExecutionRequest,
-        build_config: BuildConfig, public_key: str
-    ) -> Optional[str]:
-        """Step 3: Fetch encrypted CSV from middleware."""
+        build_config: BuildConfig, public_key: str, mode: str = "legacy"
+    ) -> Optional[MiddlewareResponse]:
+        """Step 3: Fetch from middleware (mode-dependent).
+
+        In legacy mode: returns MiddlewareResponse with encrypted_csv.
+        In direct_db mode: returns MiddlewareResponse with encrypted_credentials + sql_query.
+        Returns None if no datasets configured.
+        """
         if not build_config.datasets:
             logger.info("No datasets, skipping middleware fetch")
             return None
 
-        self._log.info(job_id, "middleware", f"Fetching CSV for {len(build_config.datasets)} dataset(s)", progress=30)
+        self._log.info(job_id, "middleware", f"Fetching for {len(build_config.datasets)} dataset(s) (mode={mode})", progress=30)
 
         try:
             dataset = build_config.datasets[0]
@@ -156,21 +177,35 @@ class SecureExecutor(IExecutor):
                 metadata={'archetype_path': dataset.archetype_path, 'import_path': dataset.import_path}
             )
 
-            response = self._middleware_client.fetch_encrypted_csv(middleware_request)
+            response = self._middleware_client.fetch_encrypted_csv(middleware_request, mode=mode)
 
             if not response.success:
                 raise BuildValidationError(f"Middleware fetch failed: {response.error}")
-            if not response.encrypted_csv:
-                raise BuildValidationError("Middleware returned empty CSV")
 
-            self._log.info(job_id, "middleware", f"Received encrypted CSV ({len(response.encrypted_csv)} chars)", progress=40)
-            return response.encrypted_csv
+            if response.is_direct_db:
+                if not response.encrypted_credentials or not response.sql_query:
+                    raise BuildValidationError("Middleware returned incomplete direct_db response")
+                self._log.info(
+                    job_id, "middleware",
+                    f"Received direct_db response (credentials={len(response.encrypted_credentials)} chars)",
+                    progress=40
+                )
+            else:
+                if not response.encrypted_csv:
+                    raise BuildValidationError("Middleware returned empty CSV")
+                self._log.info(
+                    job_id, "middleware",
+                    f"Received encrypted CSV ({len(response.encrypted_csv)} chars)",
+                    progress=40
+                )
+
+            return response
 
         except BuildValidationError:
             raise
         except Exception as e:
-            self._log.error(job_id, "middleware", f"Failed to fetch CSV: {e}", error=e)
-            raise BuildValidationError(f"Failed to fetch CSV: {e}")
+            self._log.error(job_id, "middleware", f"Failed to fetch from middleware: {e}", error=e)
+            raise BuildValidationError(f"Failed to fetch from middleware: {e}")
 
     def _step_zip_and_encrypt(self, job_id: str, repo_path: str, public_key: str) -> str:
         """Step 4: Zip and encrypt build folder."""
@@ -221,6 +256,28 @@ class SecureExecutor(IExecutor):
             return success, output, attestation, enclave_timing
         except Exception as e:
             self._log.error(job_id, "enclave", f"Enclave execution failed: {e}", error=e)
+            raise
+
+    def _step_execute_in_enclave_db_fetch(
+        self, job_id: str, session_id: str,
+        encrypted_zip: str, encrypted_credentials: str, sql_query: str
+    ) -> tuple:
+        """Step 5 (direct_db): Execute in enclave with DB fetch. Returns (success, output, attestation, enclave_timing)."""
+        self._log.info(job_id, "enclave", "Sending to enclave for DB fetch execution", progress=85)
+
+        try:
+            success, output, attestation = self._enclave_client.send_encrypted_data_with_db_fetch(
+                session_id, encrypted_zip, encrypted_credentials, sql_query
+            )
+            logger.info(f"Enclave DB fetch execution completed: success={success}")
+            enclave_timing = None
+            if isinstance(attestation, dict) and 'timing' in attestation:
+                enclave_timing = attestation.pop('timing')
+            if attestation:
+                logger.info(f"Attestation received (db_fetch_inside_enclave)")
+            return success, output, attestation, enclave_timing
+        except Exception as e:
+            self._log.error(job_id, "enclave", f"Enclave DB fetch execution failed: {e}", error=e)
             raise
 
     def _create_result(

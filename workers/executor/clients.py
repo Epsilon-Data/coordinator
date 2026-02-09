@@ -142,6 +142,60 @@ class EnclaveClient(IEnclaveClient):
             logger.error(f"[ENCLAVE] Failed to send: {str(e)}", exc_info=True)
             return False, str(e), None
 
+    def send_encrypted_data_with_db_fetch(
+        self,
+        session_id: str,
+        encrypted_zip: str,
+        encrypted_credentials: str,
+        sql_query: str
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Send encrypted data to enclave for execution with direct DB fetch.
+
+        The enclave will decrypt credentials, connect to the DB, fetch data,
+        generate CSV internally, and execute the script.
+
+        Returns:
+            Tuple of (success, output, attestation_data)
+        """
+        try:
+            logger.info(f"[ENCLAVE] Sending data for DB fetch execution, session: {session_id[:20]}...")
+
+            request = {
+                'operation': 'execute_with_db_fetch',
+                'session_id': session_id,
+                'encrypted_data': encrypted_zip,
+                'encrypted_credentials': encrypted_credentials,
+                'sql_query': sql_query
+            }
+
+            response = self._send_to_enclave(request)
+
+            if response.get('success'):
+                logger.info(f"[ENCLAVE] DB fetch execution successful")
+
+                attestation = response.get('attestation')
+                enclave_proof = response.get('enclave_proof', {})
+
+                if enclave_proof.get('db_fetch_inside_enclave'):
+                    logger.info("[ENCLAVE] Confirmed: data fetched inside enclave")
+
+                if attestation:
+                    logger.info(f"[ENCLAVE] Attestation received")
+
+                enclave_timing = response.get('timing')
+                if enclave_timing and attestation is not None:
+                    attestation['timing'] = enclave_timing
+
+                return True, response.get('output', ''), attestation
+            else:
+                error_msg = response.get('error', 'Unknown error')
+                logger.error(f"[ENCLAVE] DB fetch execution failed: {error_msg}")
+                return False, error_msg, None
+
+        except Exception as e:
+            logger.error(f"[ENCLAVE] Failed to send DB fetch request: {str(e)}", exc_info=True)
+            return False, str(e), None
+
     def _send_to_enclave(self, request_data: dict) -> dict:
         """Send request to enclave via VSock."""
         try:
@@ -297,6 +351,38 @@ class EnclaveClientLocal(IEnclaveClient):
             logger.error(f"[ENCLAVE] Execution failed: {e}", exc_info=True)
             return False, str(e), None
 
+        finally:
+            self._sessions.pop(session_id, None)
+
+    def send_encrypted_data_with_db_fetch(
+        self,
+        session_id: str,
+        encrypted_zip: str,
+        encrypted_credentials: str,
+        sql_query: str
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Local simulation of DB fetch execution.
+
+        In local mode, we cannot actually connect to a DB via tap0.
+        This decrypts the credentials and logs them, then falls back
+        to executing without CSV data.
+        """
+        logger.warning("[ENCLAVE-LOCAL] direct_db mode not fully supported in local mode")
+        logger.info(f"[ENCLAVE-LOCAL] Would execute SQL: {sql_query[:100]}...")
+
+        if session_id not in self._sessions:
+            return False, f"Session not found: {session_id}", None
+
+        private_key = self._sessions[session_id]
+
+        try:
+            # Decrypt ZIP and execute without CSV (local simulation)
+            decrypted_zip = self._crypto.decrypt(encrypted_zip, private_key)
+            output = self._execute_script(decrypted_zip)
+            return True, output, None
+        except Exception as e:
+            logger.error(f"[ENCLAVE-LOCAL] DB fetch execution failed: {e}", exc_info=True)
+            return False, str(e), None
         finally:
             self._sessions.pop(session_id, None)
 
@@ -479,15 +565,16 @@ class MiddlewareClient(IMiddlewareClient):
 
         return prepared.url, prepared.body, signed_headers
 
-    def fetch_encrypted_csv(self, request: MiddlewareRequest) -> MiddlewareResponse:
+    def fetch_encrypted_csv(self, request: MiddlewareRequest, mode: str = "legacy") -> MiddlewareResponse:
         url = self._endpoint_url
-        logger.info(f"[MIDDLEWARE] POST {url}")
+        logger.info(f"[MIDDLEWARE] POST {url} (mode={mode})")
         logger.info(f"[MIDDLEWARE] Dataset: {request.dataset_id}, Archetype: {request.archetype_id}")
 
         payload = {
             'dataset_id': request.dataset_id,
             'archetype_id': request.archetype_id,
             'public_key': request.public_key or '',
+            'mode': mode,
         }
 
         last_error = None
@@ -567,15 +654,35 @@ class MiddlewareClient(IMiddlewareClient):
                 if not data.get('success'):
                     return MiddlewareResponse(success=False, error=data.get('error', 'Unknown error'))
 
-                encrypted_csv = data.get('csv', '')
-                logger.info(f"[MIDDLEWARE] Received encrypted CSV ({len(encrypted_csv)} chars)")
+                response_mode = data.get('mode', 'legacy')
 
-                return MiddlewareResponse(
-                    success=True,
-                    encrypted_csv=encrypted_csv,
-                    csv_metadata=data.get('metadata', {}),
-                    request_id=response.headers.get('X-Request-ID', 'http-request')
-                )
+                if response_mode == 'direct_db':
+                    # Direct DB mode: encrypted credentials + SQL query
+                    encrypted_credentials = data.get('encrypted_credentials', '')
+                    sql_query = data.get('sql_query', '')
+                    logger.info(
+                        f"[MIDDLEWARE] direct_db response: credentials={len(encrypted_credentials)} chars, "
+                        f"sql_query={len(sql_query)} chars"
+                    )
+                    return MiddlewareResponse(
+                        success=True,
+                        mode='direct_db',
+                        encrypted_credentials=encrypted_credentials,
+                        sql_query=sql_query,
+                        csv_metadata=data.get('metadata', {}),
+                        request_id=response.headers.get('X-Request-ID', 'http-request')
+                    )
+                else:
+                    # Legacy mode: encrypted CSV
+                    encrypted_csv = data.get('csv', '')
+                    logger.info(f"[MIDDLEWARE] Received encrypted CSV ({len(encrypted_csv)} chars)")
+                    return MiddlewareResponse(
+                        success=True,
+                        mode='legacy',
+                        encrypted_csv=encrypted_csv,
+                        csv_metadata=data.get('metadata', {}),
+                        request_id=response.headers.get('X-Request-ID', 'http-request')
+                    )
 
             except requests.exceptions.Timeout:
                 last_error = f"Request timeout after {self._timeout}s"

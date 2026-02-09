@@ -131,6 +131,10 @@ class JobRepository:
             job.status = status
             job.updated_at = datetime.utcnow()
 
+            # Set completed_at for terminal statuses
+            if status in ('success', 'failed', 'rejected'):
+                job.completed_at = datetime.utcnow()
+
             # Handle additional fields with mapping to maintain compatibility
             field_mapping = {
                 'repo_path': 'result_metadata',

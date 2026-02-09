@@ -73,6 +73,7 @@ class MiddlewareConfig:
     timeout_seconds: int = field(default_factory=lambda: int(os.getenv('MIDDLEWARE_TIMEOUT_SECONDS', '60')))
     mode: str = field(default_factory=lambda: os.getenv('MIDDLEWARE_MODE', 'local'))  # "aws" or "local"
     aws_region: str = field(default_factory=lambda: os.getenv('AWS_REGION', 'ap-southeast-2'))
+    use_direct_db: bool = field(default_factory=lambda: os.getenv('MIDDLEWARE_DIRECT_DB', 'false').lower() == 'true')
 
     @property
     def is_configured(self) -> bool:

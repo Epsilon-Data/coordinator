@@ -25,10 +25,14 @@ class MiddlewareRequest(BaseModel):
 class MiddlewareResponse(BaseModel):
     """Response object from middleware."""
     success: bool = Field(..., description="Whether the request succeeded")
-    encrypted_csv: Optional[str] = Field(default=None, description="Encrypted CSV data")
+    encrypted_csv: Optional[str] = Field(default=None, description="Encrypted CSV data (legacy mode)")
     csv_metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
     error: Optional[str] = Field(default=None, description="Error message if failed")
     request_id: Optional[str] = Field(default=None, description="Request tracking ID")
+    # direct_db mode fields
+    mode: str = Field(default="legacy", description="Response mode: 'legacy' or 'direct_db'")
+    encrypted_credentials: Optional[str] = Field(default=None, description="Encrypted DB credentials (direct_db mode)")
+    sql_query: Optional[str] = Field(default=None, description="SQL query string (direct_db mode)")
 
     model_config = {"frozen": False, "extra": "ignore"}
 
@@ -36,6 +40,11 @@ class MiddlewareResponse(BaseModel):
     def is_error(self) -> bool:
         """Check if response is an error."""
         return not self.success or self.error is not None
+
+    @property
+    def is_direct_db(self) -> bool:
+        """Check if this is a direct_db mode response."""
+        return self.mode == "direct_db"
 
 
 class IExecutor(ABC):
@@ -92,6 +101,17 @@ class IEnclaveClient(ABC):
         pass
 
     @abstractmethod
+    def send_encrypted_data_with_db_fetch(
+        self,
+        session_id: str,
+        encrypted_zip: str,
+        encrypted_credentials: str,
+        sql_query: str
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Send encrypted data to enclave with direct DB fetch. Returns (success, output/error, attestation)."""
+        pass
+
+    @abstractmethod
     def health_check(self) -> bool:
         """Check if the enclave is healthy."""
         pass
@@ -117,8 +137,8 @@ class IMiddlewareClient(ABC):
     """Interface for middleware client."""
 
     @abstractmethod
-    def fetch_encrypted_csv(self, request: MiddlewareRequest) -> MiddlewareResponse:
-        """Fetch encrypted CSV data from middleware."""
+    def fetch_encrypted_csv(self, request: MiddlewareRequest, mode: str = "legacy") -> MiddlewareResponse:
+        """Fetch data from middleware. Mode: 'legacy' (encrypted CSV) or 'direct_db' (encrypted credentials + SQL)."""
         pass
 
     @abstractmethod
