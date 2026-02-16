@@ -148,7 +148,9 @@ class JobRepository:
                 'error_message': 'error_message',
                 'attestation': 'attestation',  # Enclave attestation document
                 'verification_receipt': 'verification_receipt',  # Server-side verification result
-                'execution_metrics': 'execution_metrics'  # Per-step timing metrics
+                'execution_metrics': 'execution_metrics',  # Per-step timing metrics
+                'enclave_version': 'enclave_version',
+                'enclave_pcr0': 'enclave_pcr0'
             }
 
             for key, value in kwargs.items():
@@ -324,6 +326,8 @@ class JobRepository:
             'attestation': job.attestation,
             'verification_receipt': job.verification_receipt,
             'execution_metrics': job.execution_metrics,
+            'enclave_version': job.enclave_version,
+            'enclave_pcr0': job.enclave_pcr0,
             'created_at': job.created_at,
             'updated_at': job.updated_at,
             # Convenience properties

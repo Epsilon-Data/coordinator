@@ -59,6 +59,10 @@ class JobRequest(Base):
     verification_receipt: Mapped[Optional[str]] = mapped_column(Text)  # JSON: server-side verification result
     execution_metrics: Mapped[Optional[str]] = mapped_column(Text)  # JSON: per-step timing metrics
 
+    # Enclave metadata
+    enclave_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    enclave_pcr0: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
