@@ -16,6 +16,7 @@ from workers.executor.models import JobExecutionRequest, JobStatus
 from workers.executor.settings import get_settings, validate_and_raise
 from workers.executor.exceptions import ConfigurationError
 from workers.executor.factories import ExecutorFactory
+from sqlalchemy import text
 
 
 class ExecutorWorker(ExecutorWorkerBase):
@@ -57,7 +58,7 @@ class ExecutorWorker(ExecutorWorkerBase):
             from shared.db import db
             with db.get_session() as session:
                 session.execute(
-                    __import__('sqlalchemy').text(
+                    text(
                         "UPDATE boot_events SET boot_ready_at = NOW(), "
                         "boot_duration_ms = EXTRACT(EPOCH FROM (NOW() - boot_requested_at))::integer * 1000 "
                         "WHERE id = (SELECT id FROM boot_events WHERE boot_ready_at IS NULL ORDER BY id DESC LIMIT 1)"
@@ -66,7 +67,7 @@ class ExecutorWorker(ExecutorWorkerBase):
                 session.commit()
             get_logger(__name__).info("[BOOT] Stamped boot_ready_at in boot_events")
         except Exception as e:
-            get_logger(__name__).debug(f"[BOOT] Could not stamp boot_ready_at: {e}")
+            get_logger(__name__).warning(f"[BOOT] Could not stamp boot_ready_at: {e}")
 
     def _validate_environment(self) -> None:
         """Validate the runtime environment configuration."""
@@ -167,7 +168,7 @@ class ExecutorWorker(ExecutorWorkerBase):
             # Step 1: Load cloned repository
             repo_path = f"{self._settings.storage.shared_storage_path}/repositories/{job_id}"
             if not os.path.exists(repo_path):
-                raise Exception(f"Repository not found: {repo_path}")
+                raise FileNotFoundError(f"Repository not found: {repo_path}")
 
             logger.info(f"[REPO] Found repository at {repo_path}")
 
@@ -201,13 +202,25 @@ class ExecutorWorker(ExecutorWorkerBase):
                 if result.attestation:
                     verification_receipt = self._verify_attestation(job_id, result.attestation, logger)
 
+                # Extract enclave version and PCR0 for metadata tracking
+                enclave_version = os.environ.get("ENCLAVE_VERSION", "unknown")
+                enclave_pcr0 = None
+                if verification_receipt:
+                    try:
+                        vr_data = json.loads(verification_receipt) if isinstance(verification_receipt, str) else verification_receipt
+                        enclave_pcr0 = vr_data.get("pcrs", {}).get("pcr0")
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        pass
+
                 job_repository.update_job_status(
                     job_id=job_id,
                     status=JobStatus.SUCCESS.value,
                     execution_result=result.output,
                     attestation=result.attestation,
                     verification_receipt=verification_receipt,
-                    execution_metrics=result.step_timing
+                    execution_metrics=result.step_timing,
+                    enclave_version=enclave_version,
+                    enclave_pcr0=enclave_pcr0
                 )
                 logger.info(f"[SUCCESS] Job {job_id} completed")
                 if result.attestation:
@@ -235,7 +248,7 @@ class ExecutorWorker(ExecutorWorkerBase):
 
         except Exception as e:
             logger.error(f"[ERROR] Job {job_id} failed: {str(e)}")
-            job_repository.update_job_status(job_id=job_id, status=JobStatus.FAILED.value, output=str(e))
+            job_repository.update_job_status(job_id=job_id, status=JobStatus.FAILED.value, error_message=str(e))
             return False
 
 

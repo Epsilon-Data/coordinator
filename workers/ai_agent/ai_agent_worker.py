@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -41,8 +43,6 @@ class AIAgentWorker(AIWorkerBase):
 
     def _save_analysis_result(self, job_id: str, decision: AnalysisDecision) -> Path:
         """Save analysis results to file"""
-        import json
-
         result_path = self.analysis_path / job_id / "analysis_result.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
 

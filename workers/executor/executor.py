@@ -403,4 +403,5 @@ class SecureExecutor(IExecutor):
                 return self._enclave_client.health_check()
             return True
         except Exception:
-            return True
+            logger.warning("Executor health check failed, reporting not ready")
+            return False
