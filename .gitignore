@@ -71,3 +71,6 @@ Tasks.md
 .claude
 /workers/executor/enclave_app/
 /workers/enclave/
+
+# Deploy scripts (contain environment-specific config)
+scripts/deploy-ec2.sh
