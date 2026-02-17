@@ -103,7 +103,7 @@ datasets: []
         public_key, session_id = enclave_client.get_public_key('JOB-123')
         encrypted_zip = enclave_client.encrypt_zip_data(sample_zip_with_script, public_key)
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip=encrypted_zip
         )
@@ -145,7 +145,7 @@ else:
         encrypted_zip = enclave_client.encrypt_zip_data(zip_data, public_key)
         encrypted_csv = enclave_client._crypto.encrypt(sample_csv_data, public_key)
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip=encrypted_zip,
             encrypted_csv=encrypted_csv
@@ -159,7 +159,7 @@ else:
         public_key, _ = enclave_client.get_public_key('JOB-123')
         encrypted_zip = enclave_client.encrypt_zip_data(sample_zip_with_script, public_key)
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id='nonexistent_session',
             encrypted_zip=encrypted_zip
         )
@@ -186,7 +186,7 @@ else:
         """Test handling of decryption errors."""
         _, session_id = enclave_client.get_public_key('JOB-123')
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip='invalid_encrypted_data'
         )
@@ -205,7 +205,7 @@ else:
         public_key, session_id = enclave_client.get_public_key('JOB-123')
         encrypted_zip = enclave_client.encrypt_zip_data(zip_data, public_key)
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip=encrypted_zip
         )
@@ -228,7 +228,7 @@ analysis:
         public_key, session_id = enclave_client.get_public_key('JOB-123')
         encrypted_zip = enclave_client.encrypt_zip_data(zip_data, public_key)
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip=encrypted_zip
         )
@@ -252,7 +252,7 @@ analysis:
         public_key, session_id = enclave_client.get_public_key('JOB-123')
         encrypted_zip = enclave_client.encrypt_zip_data(zip_data, public_key)
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip=encrypted_zip
         )
@@ -269,7 +269,7 @@ analysis:
         public_key, session_id = enclave_client.get_public_key('JOB-123')
         encrypted_zip = enclave_client.encrypt_zip_data(sample_zip_with_script, public_key)
 
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip=encrypted_zip
         )
@@ -393,7 +393,7 @@ else:
         encrypted_csv = enclave_client._crypto.encrypt(csv_data, public_key)
 
         # Execute in "enclave"
-        success, output = enclave_client.send_encrypted_data_to_enclave(
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
             session_id=session_id,
             encrypted_zip=encrypted_zip,
             encrypted_csv=encrypted_csv

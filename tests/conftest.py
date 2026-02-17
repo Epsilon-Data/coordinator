@@ -2,6 +2,11 @@
 Shared pytest fixtures for Epsilon Coordinator tests.
 """
 import os
+
+# Set required env vars before any application imports (needed at collection time)
+os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/testdb")
+os.environ.setdefault("SHARED_STORAGE_PATH", "/tmp/test-storage")
+
 import tempfile
 import shutil
 from pathlib import Path

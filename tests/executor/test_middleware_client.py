@@ -177,7 +177,7 @@ class TestMiddlewareClient:
         middleware_client.fetch_encrypted_csv(mock_request)
 
         call_args = mock_post.call_args
-        assert call_args[0][0] == 'http://localhost:8001/fetch-csv'
+        assert call_args[0][0] == 'http://localhost:8001'
 
         payload = call_args[1]['json']
         assert payload['dataset_id'] == 'ds-001'

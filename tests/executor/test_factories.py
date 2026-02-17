@@ -111,8 +111,10 @@ class TestMiddlewareClientFactory:
             client = MiddlewareClientFactory.create_client(mock_settings_with_url)
 
             MockClient.assert_called_once_with(
-                mock_settings_with_url,
-                'http://localhost:8001'
+                settings=mock_settings_with_url,
+                endpoint_url='http://localhost:8001',
+                aws_region=mock_settings_with_url.middleware.aws_region,
+                mode=mock_settings_with_url.middleware.mode,
             )
             assert client is mock_client
 

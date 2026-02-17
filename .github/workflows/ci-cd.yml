@@ -31,9 +31,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,executor]"
 
       - name: Run tests
+        env:
+          DATABASE_URL: "postgresql://test:test@localhost:5432/testdb"
         run: pytest --tb=short -q
 
   # ==========================================
