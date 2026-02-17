@@ -525,15 +525,13 @@ class MiddlewareClient(IMiddlewareClient):
         # Use frozen credentials for EC2 instance role
         frozen_credentials = credentials.get_frozen_credentials()
 
-        # Log credential info (safely)
+        # Log credential info (safely, DEBUG only)
         access_key = frozen_credentials.access_key
         has_secret = bool(frozen_credentials.secret_key)
         has_token = bool(frozen_credentials.token)
-        logger.info(f"[MIDDLEWARE-AUTH] Access Key: {access_key[:8]}...{access_key[-4:] if len(access_key) > 12 else ''}")
-        logger.info(f"[MIDDLEWARE-AUTH] Secret Key present: {has_secret}")
-        logger.info(f"[MIDDLEWARE-AUTH] Session Token present: {has_token}")
+        logger.debug(f"[MIDDLEWARE-AUTH] Access Key: {access_key[:8]}...")
+        logger.debug(f"[MIDDLEWARE-AUTH] Secret Key present: {has_secret}, Token present: {has_token}")
         logger.info(f"[MIDDLEWARE-AUTH] Signing region: {self._aws_region}")
-        logger.info(f"[MIDDLEWARE-AUTH] Service: lambda")
 
         body = json.dumps(payload)
         logger.debug(f"[MIDDLEWARE-AUTH] Request body length: {len(body)} bytes")
@@ -552,16 +550,13 @@ class MiddlewareClient(IMiddlewareClient):
         prepared = aws_request.prepare()
         signed_headers = dict(prepared.headers)
 
-        # Log signed headers (partial for security)
-        logger.info("[MIDDLEWARE-AUTH] Signed request headers:")
+        # Log signed headers (DEBUG only, partial for security)
+        logger.debug("[MIDDLEWARE-AUTH] Signed request headers:")
         for key, value in signed_headers.items():
-            if key.lower() == 'authorization':
-                # Show only the beginning of auth header
-                logger.info(f"  {key}: {value[:80]}...")
-            elif key.lower() == 'x-amz-security-token':
-                logger.info(f"  {key}: {value[:20]}...{value[-10:]}")
+            if key.lower() in ('authorization', 'x-amz-security-token'):
+                logger.debug(f"  {key}: {value[:20]}...")
             else:
-                logger.info(f"  {key}: {value}")
+                logger.debug(f"  {key}: {value}")
 
         return prepared.url, prepared.body, signed_headers
 
