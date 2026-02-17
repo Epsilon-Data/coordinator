@@ -10,7 +10,7 @@ Flow:
 """
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from workers.executor.settings import Settings
@@ -296,7 +296,7 @@ class SecureExecutor(IExecutor):
             enclave_cid=getattr(self._enclave_client, 'enclave_cid', None),
             attestation=attestation,
             step_timing=step_timing,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
 
         if result.is_success:
@@ -329,7 +329,7 @@ class SecureExecutor(IExecutor):
             output=None,
             error=f"Build validation failed: {error}",
             enclave_cid=None,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
 
     def _handle_execution_error(self, job_id: str, error: Exception, start_time: float) -> ExecutionResult:
@@ -346,7 +346,7 @@ class SecureExecutor(IExecutor):
             output=None,
             error=str(error),
             enclave_cid=getattr(self._enclave_client, 'enclave_cid', None),
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
 
     def prepare_environment(self, request: JobExecutionRequest) -> Dict[str, Any]:

@@ -1,5 +1,4 @@
 from crewai import Agent
-from langchain_openai import ChatOpenAI
 
 
 def create_policy_agent(policy_tool) -> Agent:

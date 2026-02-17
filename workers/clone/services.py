@@ -79,12 +79,12 @@ class GitService:
         except subprocess.TimeoutExpired:
             error_msg = f"Repository clone timed out after {self.timeout} seconds"
             logger.error(error_msg)
-            raise Exception(error_msg)
+            raise RuntimeError(error_msg)
 
         except subprocess.CalledProcessError as e:
             error_msg = f"Git clone failed: {e.stderr}"
             logger.error(error_msg)
-            raise Exception(error_msg)
+            raise RuntimeError(error_msg)
 
     def get_repo_info(self, repo_path: Path) -> Dict[str, Any]:
         """
@@ -147,6 +147,8 @@ class StorageManager:
 
     def get_repository_path(self, job_id: str) -> Path:
         """Get the path where repository should be stored."""
+        if '/' in job_id or '\\' in job_id or '..' in job_id:
+            raise ValueError(f"Invalid job_id: {job_id}")
         return self.repositories_path / job_id
 
     def prepare_repository_directory(self, job_id: str) -> Path:

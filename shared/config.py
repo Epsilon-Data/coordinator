@@ -1,10 +1,13 @@
 import os
+import logging
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
 # Auto-load .env file from project root
 from dotenv import load_dotenv
+
+_logger = logging.getLogger(__name__)
 
 # Find project root (where .env is located)
 _current_dir = Path(__file__).resolve().parent
@@ -14,13 +17,13 @@ _project_root = _current_dir.parent  # Go up from shared/ to project root
 _env_file = _project_root / '.env'
 if _env_file.exists():
     load_dotenv(_env_file)
-    print(f"✅ Loaded environment from {_env_file}")
+    _logger.debug("Loaded environment from %s", _env_file)
 else:
     # Try current working directory
     _cwd_env = Path.cwd() / '.env'
     if _cwd_env.exists():
         load_dotenv(_cwd_env)
-        print(f"✅ Loaded environment from {_cwd_env}")
+        _logger.debug("Loaded environment from %s", _cwd_env)
 
 
 @dataclass

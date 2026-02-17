@@ -3,6 +3,7 @@ Client implementations for executor worker: enclave and middleware clients.
 """
 import json
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -29,17 +30,17 @@ logger = logging.getLogger("epsilon.executor")
 # Encryption constants
 RSA_KEY_SIZE_BITS = 2048
 
-# Network constants
-VSOCK_TIMEOUT_SECONDS = 300
+# Network constants (configurable via env vars)
+VSOCK_TIMEOUT_SECONDS = int(os.getenv('VSOCK_TIMEOUT_SECONDS', '300'))
 VSOCK_RECV_BUFFER_BYTES = 4 * 1024 * 1024
-HEALTH_CHECK_TIMEOUT_SECONDS = 5
+HEALTH_CHECK_TIMEOUT_SECONDS = int(os.getenv('HEALTH_CHECK_TIMEOUT_SECONDS', '5'))
 HTTP_ERROR_THRESHOLD = 400
 HTTP_RETRY_STATUS_CODES = {502, 503, 504}
-HTTP_MAX_RETRIES = 3
+HTTP_MAX_RETRIES = int(os.getenv('HTTP_MAX_RETRIES', '3'))
 HTTP_RETRY_BASE_DELAY = 1.0  # seconds
 
 # Script execution constants
-SCRIPT_TIMEOUT_SECONDS = 60
+SCRIPT_TIMEOUT_SECONDS = int(os.getenv('SCRIPT_TIMEOUT_SECONDS', '60'))
 BUILD_YML_PATH = 'build.yml'
 CSV_OUTPUT_PATH = 'generated/data.csv'
 
@@ -71,7 +72,7 @@ class EnclaveClient(IEnclaveClient):
             response = self._send_to_enclave(request)
 
             if not response.get('success'):
-                raise Exception(f"Enclave keypair generation failed: {response.get('error')}")
+                raise EnclaveConnectionError(f"Enclave keypair generation failed: {response.get('error')}")
 
             return response['public_key'], response['session_id']
         except Exception as e:
@@ -198,11 +199,11 @@ class EnclaveClient(IEnclaveClient):
 
     def _send_to_enclave(self, request_data: dict) -> dict:
         """Send request to enclave via VSock."""
-        try:
-            operation = request_data.get('operation', 'unknown')
-            logger.info(f"[VSOCK] Creating connection for {operation}...")
+        operation = request_data.get('operation', 'unknown')
+        logger.info(f"[VSOCK] Creating connection for {operation}...")
 
-            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        try:
             sock.settimeout(VSOCK_TIMEOUT_SECONDS)
 
             logger.info(f"[VSOCK] Connecting to CID {self.enclave_cid}:{self._settings.enclave.vsock_port}")
@@ -215,12 +216,13 @@ class EnclaveClient(IEnclaveClient):
             response_data = self._recv_all(sock)
             response = json.loads(response_data.decode())
 
-            sock.close()
             return response
 
         except Exception as e:
             logger.error(f"[VSOCK] Failed: {str(e)}", exc_info=True)
             raise
+        finally:
+            sock.close()
 
     def _recv_all(self, sock: socket.socket) -> bytes:
         """Receive complete response with chunked reading."""
@@ -607,33 +609,20 @@ class MiddlewareClient(IMiddlewareClient):
                     continue
 
                 if response.status_code >= HTTP_ERROR_THRESHOLD:
-                    # Detailed error logging for debugging
                     logger.error(f"[MIDDLEWARE-ERROR] HTTP {response.status_code} received")
-                    logger.error(f"[MIDDLEWARE-ERROR] Response headers:")
-                    for key, value in response.headers.items():
-                        logger.error(f"  {key}: {value}")
-                    logger.error(f"[MIDDLEWARE-ERROR] Response body: {response.text[:1000]}")
+                    logger.debug(f"[MIDDLEWARE-ERROR] Response body: {response.text[:500]}")
 
                     # Parse error if JSON
                     try:
                         error_data = response.json() if response.content else {}
                         error_msg = error_data.get('error') or error_data.get('message') or error_data.get('Message') or f"HTTP {response.status_code}"
-                        logger.error(f"[MIDDLEWARE-ERROR] Parsed error: {error_data}")
                     except Exception:
-                        error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                        error_msg = f"HTTP {response.status_code}"
 
-                    # Specific 403 debugging
+                    # Specific 403 debugging (at debug level to avoid leaking config)
                     if response.status_code == 403:
-                        logger.error("[MIDDLEWARE-ERROR] === 403 FORBIDDEN DEBUG ===")
-                        logger.error("[MIDDLEWARE-ERROR] Possible causes:")
-                        logger.error("  1. IAM role doesn't have lambda:InvokeFunctionUrl permission")
-                        logger.error("  2. Lambda resource-based policy doesn't allow this caller")
-                        logger.error("  3. SigV4 signature mismatch (wrong region, service, or credentials)")
-                        logger.error("  4. Request body changed after signing")
-                        logger.error("  5. Clock skew between EC2 and AWS (check system time)")
-                        logger.error(f"[MIDDLEWARE-ERROR] Mode: {self._mode}")
-                        logger.error(f"[MIDDLEWARE-ERROR] Endpoint: {self._endpoint_url}")
-                        logger.error(f"[MIDDLEWARE-ERROR] Region: {self._aws_region}")
+                        logger.error(f"[MIDDLEWARE-ERROR] 403 Forbidden — check IAM role, resource policy, SigV4 config, or clock skew")
+                        logger.debug(f"[MIDDLEWARE-ERROR] Mode: {self._mode}, Region: {self._aws_region}")
 
                     return MiddlewareResponse(success=False, error=error_msg)
 
@@ -692,8 +681,18 @@ class MiddlewareClient(IMiddlewareClient):
                 )
                 time.sleep(delay)
 
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                # Retryable parsing errors
+                last_error = f"Response parsing error: {e}"
+                delay = HTTP_RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"[MIDDLEWARE] Parse error, retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 1}/{HTTP_MAX_RETRIES}): {e}"
+                )
+                time.sleep(delay)
+
             except Exception as e:
-                logger.error(f"[MIDDLEWARE] Error: {e}", exc_info=True)
+                logger.error(f"[MIDDLEWARE] Unexpected error: {e}", exc_info=True)
                 return MiddlewareResponse(success=False, error=str(e))
 
         # All retries exhausted

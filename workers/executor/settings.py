@@ -19,12 +19,14 @@ if _env_file.exists():
 
 @dataclass
 class AWSConfig:
-    """AWS-specific configuration."""
+    """AWS-specific configuration.
+
+    Note: AWS credentials (access key, secret key, session token) are resolved
+    automatically by boto3 via its standard credential chain (env vars, instance
+    role, config files). They are NOT stored here.
+    """
     region: str = field(default_factory=lambda: os.getenv('KMS_REGION', 'ap-southeast-2'))
     kms_key_arn: str = field(default_factory=lambda: os.getenv('AWS_KMS_KEY_ARN', ''))
-    access_key_id: Optional[str] = field(default_factory=lambda: os.getenv('AWS_ACCESS_KEY_ID'))
-    secret_access_key: Optional[str] = field(default_factory=lambda: os.getenv('AWS_SECRET_ACCESS_KEY'))
-    session_token: Optional[str] = field(default_factory=lambda: os.getenv('AWS_SESSION_TOKEN'))
 
 
 @dataclass
@@ -118,15 +120,18 @@ class Settings:
     job_fetch_mode: str = field(default_factory=lambda: os.getenv('JOB_FETCH_MODE', 'polling'))
 
     def to_dict(self) -> Dict[str, Any]:
+        """Return settings as dict with sensitive fields redacted."""
+        coordinator = {**self.coordinator.__dict__}
+        coordinator['api_key'] = '***' if coordinator.get('api_key') else ''
         return {
-            'aws': self.aws.__dict__,
+            'aws': {'region': self.aws.region, 'kms_key_arn': '***' if self.aws.kms_key_arn else ''},
             'enclave': self.enclave.__dict__,
             'storage': self.storage.__dict__,
             'execution': self.execution.__dict__,
             'logging': self.logging.__dict__,
             'polling': self.polling.__dict__,
-            'coordinator': self.coordinator.__dict__,
-            'middleware': self.middleware.__dict__,
+            'coordinator': coordinator,
+            'middleware': {k: v for k, v in self.middleware.__dict__.items() if k != 'endpoint_url'},
             'worker_id': self.worker_id,
             'environment': self.environment,
             'job_fetch_mode': self.job_fetch_mode
@@ -158,13 +163,6 @@ def validate_environment(settings: Settings) -> Tuple[bool, List[str]]:
 
     if not settings.aws.kms_key_arn and not skip_enclave_validation:
         errors.append("AWS_KMS_KEY_ARN is required when not using local client or external enclave")
-
-    # AWS credentials: allow either explicit env vars OR EC2 instance role
-    # Only validate if explicit credentials are partially set (inconsistent config)
-    has_access_key = bool(settings.aws.access_key_id)
-    has_secret_key = bool(settings.aws.secret_access_key)
-    if has_access_key != has_secret_key:
-        errors.append("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set or both be empty (for instance role)")
 
     if not skip_enclave_validation:
         eif_path = Path(settings.enclave.eif_path)

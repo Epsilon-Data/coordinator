@@ -4,7 +4,7 @@ Maintains backward compatibility with existing database.py interface
 """
 import logging
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 import json
 
@@ -28,6 +28,8 @@ class Database:
             pool_size=10,
             max_overflow=20,
             pool_pre_ping=True,
+            pool_timeout=30,
+            connect_args={"connect_timeout": 10, "options": "-c statement_timeout=30000"},
             echo=False  # Set to True for SQL debugging
         )
         self.SessionLocal = sessionmaker(
@@ -75,7 +77,7 @@ class SQLAlchemyCursor:
         self.session = session
         self._last_result = None
 
-    def execute(self, query: str, params: tuple = None):
+    def execute(self, query: str, params: dict = None):
         """Execute a query with optional parameters"""
         try:
             if params:
@@ -129,11 +131,11 @@ class JobRepository:
 
             # Update status
             job.status = status
-            job.updated_at = datetime.utcnow()
+            job.updated_at = datetime.now(timezone.utc)
 
             # Set completed_at for terminal statuses
             if status in ('success', 'failed', 'rejected'):
-                job.completed_at = datetime.utcnow()
+                job.completed_at = datetime.now(timezone.utc)
 
             # Handle additional fields with mapping to maintain compatibility
             field_mapping = {
@@ -196,7 +198,7 @@ class JobRepository:
             if job:
                 # Create log entry
                 log_entry = {
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "worker": worker_name,
                     "level": level,
                     "message": message,
@@ -208,7 +210,7 @@ class JobRepository:
                 new_logs = current_logs + "\n" + json.dumps(log_entry) if current_logs else json.dumps(log_entry)
 
                 job.ai_logs = new_logs
-                job.updated_at = datetime.utcnow()
+                job.updated_at = datetime.now(timezone.utc)
 
                 logger.debug(f"Added log entry for job {job_id}: {message}")
             else:

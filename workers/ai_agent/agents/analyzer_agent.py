@@ -1,5 +1,4 @@
 from crewai import Agent
-from langchain_openai import ChatOpenAI
 
 
 def create_analyzer_agent() -> Agent:

@@ -203,9 +203,15 @@ class ZipService:
         # Use in-memory buffer instead of temp file
         buffer = BytesIO()
 
+        resolved_root = dir_path.resolve()
+
         with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for file_path in dir_path.rglob('*'):
                 if file_path.is_file() and not self._should_exclude(file_path):
+                    # Prevent symlink escape: resolved path must stay inside root
+                    if not file_path.resolve().is_relative_to(resolved_root):
+                        logger.warning(f"Skipping file outside build dir: {file_path}")
+                        continue
                     try:
                         arcname = file_path.relative_to(dir_path)
                         file_size = file_path.stat().st_size

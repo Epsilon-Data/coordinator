@@ -59,19 +59,6 @@ class CodeExecutorTool(BaseTool):
             
             return execution_result
             
-    def _prepare_dummy_data(self, execution_path: Path):
-        """Copy dummy data to execution directory"""
-        data_dir = execution_path / "data"
-        data_dir.mkdir(exist_ok=True)
-        
-        # Copy dummy data files from archetypes
-        archetypes_path = self._find_archetypes_path()
-        if archetypes_path.exists():
-            for archetype_dir in archetypes_path.iterdir():
-                if archetype_dir.is_dir():
-                    for file in archetype_dir.glob("*dummy*.csv"):
-                        shutil.copy2(file, data_dir)
-                        
     def _install_dependencies(self, execution_path: Path) -> bool:
         """Install Python requirements from yml config or requirements.txt"""
         # First try to get requirements from yml file
@@ -83,6 +70,8 @@ class CodeExecutorTool(BaseTool):
             
         if requirements_file and requirements_file.exists():
             try:
+                # WARNING: installs packages from untrusted user repos.
+                # Runs inside an isolated enclave container — no host impact.
                 subprocess.run(
                     ["pip", "install", "-r", str(requirements_file)],
                     cwd=execution_path,
@@ -165,7 +154,11 @@ class CodeExecutorTool(BaseTool):
             
         # Execute the command
         try:
-            env = os.environ.copy()
+            # Only pass whitelisted env vars to subprocess (exclude secrets)
+            _SENSITIVE_KEYS = {"DATABASE_URL", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID",
+                               "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GHCR_PAT",
+                               "GITHUB_TOKEN", "NEON_API_KEY"}
+            env = {k: v for k, v in os.environ.items() if k not in _SENSITIVE_KEYS}
             env["EPSILON_JOB_ID"] = job_id
             
             start_time = time.time()
@@ -292,7 +285,7 @@ class CodeExecutorTool(BaseTool):
     def _save_ai_execution_result(self, job_id: str, execution_result: ExecutionResult):
         """Save AI execution results for debugging and analysis"""
         import json
-        from datetime import datetime
+        from datetime import datetime, timezone
         
         # Create AI execution results directory
         shared_storage_path = Path(os.environ.get('SHARED_STORAGE_PATH', '/shared/epsilon'))
@@ -309,7 +302,7 @@ class CodeExecutorTool(BaseTool):
             "execution_time": execution_result.execution_time,
             "output_files": execution_result.output_files,
             "error_message": execution_result.error_message,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "purpose": "PII analysis execution - not production data"
         }
         

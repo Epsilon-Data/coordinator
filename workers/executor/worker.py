@@ -64,7 +64,6 @@ class ExecutorWorker(ExecutorWorkerBase):
                         "WHERE id = (SELECT id FROM boot_events WHERE boot_ready_at IS NULL ORDER BY id DESC LIMIT 1)"
                     )
                 )
-                session.commit()
             get_logger(__name__).info("[BOOT] Stamped boot_ready_at in boot_events")
         except Exception as e:
             get_logger(__name__).warning(f"[BOOT] Could not stamp boot_ready_at: {e}")
@@ -166,6 +165,8 @@ class ExecutorWorker(ExecutorWorkerBase):
             job_repository.update_job_status(job_id=job_id, status='executing')
 
             # Step 1: Load cloned repository
+            if '/' in job_id or '\\' in job_id or '..' in job_id:
+                raise ValueError(f"Invalid job_id: {job_id}")
             repo_path = f"{self._settings.storage.shared_storage_path}/repositories/{job_id}"
             if not os.path.exists(repo_path):
                 raise FileNotFoundError(f"Repository not found: {repo_path}")
@@ -176,7 +177,7 @@ class ExecutorWorker(ExecutorWorkerBase):
             job_request = JobExecutionRequest(
                 job_id=job_id,
                 repo_path=repo_path,
-                script_path='example_analysis.py',
+                script_path=None,
                 data_path=None,
                 workspace_id=job['workspace_id'],
                 ai_decision={

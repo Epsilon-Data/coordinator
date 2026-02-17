@@ -1,7 +1,7 @@
 import time
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -132,7 +132,7 @@ class JobLogger:
                     "type": type(entry.error).__name__,
                     "message": str(entry.error),
                     "traceback": traceback.format_exc(),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
                 # Also log to console for visibility
                 log.error(f"[{entry.job_id}] {entry.step_type}: {entry.message}", exc_info=entry.error)

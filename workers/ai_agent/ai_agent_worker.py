@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any
 
@@ -54,7 +54,7 @@ class AIAgentWorker(AIWorkerBase):
             "recommendations": decision.recommendations,
             "pii_details": [v.model_dump() for v in decision.pii_details] if decision.pii_details else [],
             "analyzed_files": decision.analyzed_files or [],
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         with open(result_path, 'w') as f:
@@ -174,7 +174,7 @@ class AIAgentWorker(AIWorkerBase):
         """Perform worker-specific health checks."""
         super()._health_check()
         if not self.analysis_path.exists():
-            raise Exception(f"AI analysis directory does not exist: {self.analysis_path}")
+            raise RuntimeError(f"AI analysis directory does not exist: {self.analysis_path}")
 
 
 def main() -> None:

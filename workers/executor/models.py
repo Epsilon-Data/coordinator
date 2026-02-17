@@ -1,7 +1,7 @@
 """
 Data models for executor worker using Pydantic v2.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, Any, Optional, List
 
@@ -50,7 +50,7 @@ class ExecutionResult(BaseModel):
     enclave_cid: Optional[int] = Field(default=None, description="Enclave CID used")
     attestation: Optional[Dict[str, Any]] = Field(default=None, description="Enclave attestation document")
     step_timing: Optional[Dict[str, Any]] = Field(default=None, description="Per-step execution timing metrics")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = {"frozen": False, "extra": "ignore"}
 
