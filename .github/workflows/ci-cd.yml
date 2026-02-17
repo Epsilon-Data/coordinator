@@ -4,11 +4,11 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
   pull_request:
     branches:
       - main
+  release:
+    types: [published]
 
 env:
   REGISTRY: ghcr.io
@@ -16,11 +16,12 @@ env:
 
 jobs:
   # ==========================================
-  # Test: Runs on all PRs and pushes
+  # Test: Runs on PRs and pushes
   # ==========================================
   test:
     name: Test
     runs-on: ubuntu-latest
+    if: github.event_name != 'release'
     steps:
       - uses: actions/checkout@v4
 
@@ -36,13 +37,15 @@ jobs:
         run: pytest --tb=short -q
 
   # ==========================================
-  # Build & Push: Runs on push to main or version tags
+  # Build & Push: Runs on push to main or release
   # ==========================================
   build-and-push:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push'
+    needs: [test]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'release'
 
     permissions:
       contents: read
@@ -51,6 +54,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        if: github.event_name == 'release'
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
 
       - name: Clone epsilon-attestation-verifier
         run: |
@@ -83,7 +94,17 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version || 'latest' }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
+
+      - name: Summary
+        if: github.event_name == 'release'
+        run: |
+          echo "### Coordinator Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
