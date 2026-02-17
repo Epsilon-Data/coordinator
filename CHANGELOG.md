@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0](https://github.com/Epsilon-Data/coordinator/compare/v0.1.0...v0.2.0) (2026-02-17)
+
+
+### Features
+
+* add enclave version and PCR0 metadata to job requests ([780a333](https://github.com/Epsilon-Data/coordinator/commit/780a333846cd9a1aa67511185faf8fece57bde7e))
+
+
+### Bug Fixes
+
+* clean up worker code and fix bugs ([d6195a8](https://github.com/Epsilon-Data/coordinator/commit/d6195a87b498627a8fa99a18b4280a938a049a18))
+* fix CI test failures and add test environment setup ([73cfa8a](https://github.com/Epsilon-Data/coordinator/commit/73cfa8aba1da802bad8eb5067fe81dbe39581f20))
+* harden security, remove dead config, and improve code quality ([71d8094](https://github.com/Epsilon-Data/coordinator/commit/71d80949e1ab29bff70046fd167ce39bc490a8b3))
+
 ## 1.0.0 (2026-02-17)
 
 ### Features

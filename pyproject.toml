@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "epsilon-coordinator"
-version = "1.0.0"
+version = "0.2.0"
 description = "Job processing system with secure enclave execution"
 requires-python = ">=3.9"
 
