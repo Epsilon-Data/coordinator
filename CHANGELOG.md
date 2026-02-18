@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1](https://github.com/Epsilon-Data/coordinator/compare/v1.0.0...v1.0.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* harden workers with atomic job claiming, input validation, and non-root Docker ([0635425](https://github.com/Epsilon-Data/coordinator/commit/063542571b9129542d7ea3c31a2c0e2975cb366b))
+
+
+### Documentation
+
+* fix env var mismatch, project structure, and missing config ([12ce623](https://github.com/Epsilon-Data/coordinator/commit/12ce62379e4cfbf9dd24b8d63caa6d7a38baed05))
+
 ## 1.0.0 (2026-02-17)
 
 ### Features
