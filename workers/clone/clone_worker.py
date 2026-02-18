@@ -65,9 +65,6 @@ class CloneWorker(CloneWorkerBase):
                 }
             )
 
-            # Update job status to cloning
-            job_repository.update_job_status(job_id=job_id, status='cloning')
-
             # Prepare repository directory
             self.job_logger.info(job_id, "clone", "Preparing repository directory", progress=10)
             repo_path = self.storage_manager.prepare_repository_directory(job_id)

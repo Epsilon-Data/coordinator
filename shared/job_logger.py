@@ -131,7 +131,9 @@ class JobLogger:
                 error_details = {
                     "type": type(entry.error).__name__,
                     "message": str(entry.error),
-                    "traceback": traceback.format_exc(),
+                    "traceback": "".join(traceback.format_exception(
+                        type(entry.error), entry.error, entry.error.__traceback__
+                    )),
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }
                 # Also log to console for visibility

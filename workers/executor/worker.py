@@ -161,9 +161,6 @@ class ExecutorWorker(ExecutorWorkerBase):
             logger.info(f"[JOB] Job details: {job}")
             logger.info(f"[JOB] Starting job processing pipeline...")
 
-            # Mark job as executing
-            job_repository.update_job_status(job_id=job_id, status='executing')
-
             # Step 1: Load cloned repository
             if '/' in job_id or '\\' in job_id or '..' in job_id:
                 raise ValueError(f"Invalid job_id: {job_id}")

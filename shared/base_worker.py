@@ -45,8 +45,13 @@ class BaseWorker(ABC):
             worker_name: Name of the worker for logging purposes
         """
         self.worker_name = worker_name
-        self.polling_interval = int(os.getenv('POLLING_INTERVAL', '5'))
-        self.batch_size = int(os.getenv('BATCH_SIZE', '5'))
+        try:
+            self.polling_interval = int(os.getenv('POLLING_INTERVAL', '5'))
+            self.batch_size = int(os.getenv('BATCH_SIZE', '5'))
+        except ValueError as e:
+            raise ValueError(f"Invalid env config (POLLING_INTERVAL or BATCH_SIZE must be integers): {e}")
+        self._consecutive_errors = 0
+        self._max_backoff = 60  # seconds
         self.is_running = False
 
         # Initialize loggers
@@ -154,7 +159,7 @@ class BaseWorker(ABC):
                 except Exception as e:
                     self.stats['jobs_processed'] += 1
                     self.stats['jobs_failed'] += 1
-                    self.logger.error(f"{self.worker_name}: Unexpected error processing job {job_id}: {e}")
+                    self.logger.error(f"{self.worker_name}: Unexpected error processing job {job_id}: {e}", exc_info=True)
                     self._update_job_failed(job_id, str(e))
 
             if processed_count > 0:
@@ -163,7 +168,7 @@ class BaseWorker(ABC):
             return processed_count
 
         except Exception as e:
-            self.logger.error(f"{self.worker_name}: Error during polling cycle: {e}")
+            self.logger.error(f"{self.worker_name}: Error during polling cycle: {e}", exc_info=True)
             return 0
 
     def _health_check(self) -> None:
@@ -213,6 +218,7 @@ class BaseWorker(ABC):
 
             try:
                 self._poll_cycle()
+                self._consecutive_errors = 0  # Reset on success
                 # Calculate sleep time accounting for processing duration
                 processing_time = time.time() - start_time
                 sleep_time = max(0.0, self.polling_interval - processing_time)
@@ -226,8 +232,13 @@ class BaseWorker(ABC):
                 self.logger.info(f"{self.worker_name}: Received interrupt signal")
                 break
             except Exception as e:
-                self.logger.error(f"{self.worker_name}: Unexpected error in main loop: {e}")
-                time.sleep(self.polling_interval)
+                self._consecutive_errors += 1
+                backoff = min(self.polling_interval * (2 ** self._consecutive_errors), self._max_backoff)
+                self.logger.error(
+                    f"{self.worker_name}: Unexpected error in main loop (attempt {self._consecutive_errors}): {e}",
+                    exc_info=True
+                )
+                time.sleep(backoff)
 
         self._log_stats()
         self.logger.info(f"{self.worker_name} stopped gracefully")

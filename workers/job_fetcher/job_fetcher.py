@@ -42,8 +42,6 @@ class JobFetcherWorker(JobFetcherBase):
                 metadata={"github_repo": github_repo, "commit_sha": commit_sha}
             )
 
-            self.job_repo.update_job_status(job_id, 'queued')
-
             self.job_logger.info(
                 job_id, "queued",
                 f"Job queued for cloning",

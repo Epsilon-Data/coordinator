@@ -124,14 +124,15 @@ class TestCloneWorker:
         assert result is False
         mock_storage_manager.cleanup_repository.assert_called_once()
 
-    def test_process_job_updates_status_to_cloning(self, clone_worker, sample_job, mock_job_repository):
-        """Test that status is updated to 'cloning' during processing."""
+    def test_process_job_updates_status_to_cloned(self, clone_worker, sample_job, mock_job_repository):
+        """Test that status is updated to 'cloned' after successful processing.
+        Note: 'cloning' status is now claimed atomically during fetch."""
         clone_worker.process_job(sample_job)
 
-        # Check that 'cloning' status was set
+        # 'cloning' is set atomically during fetch; worker sets 'cloned' on success
         calls = mock_job_repository.update_job_status.call_args_list
         statuses = [call[1].get('status') for call in calls if 'status' in call[1]]
-        assert 'cloning' in statuses
+        assert 'cloned' in statuses
 
     def test_process_job_with_branch(self, clone_worker, sample_job, mock_git_service):
         """Test cloning with specific branch."""

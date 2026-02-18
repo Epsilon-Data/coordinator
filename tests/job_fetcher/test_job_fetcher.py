@@ -62,13 +62,8 @@ class TestJobFetcherWorker:
         result = job_fetcher.process_job(sample_job)
 
         assert result is True
-        mock_job_repository.update_job_status.assert_called_once_with('JOB-123', 'queued')
-
-    def test_process_job_updates_to_queued(self, job_fetcher, sample_job, mock_job_repository):
-        """Test that job status is updated to 'queued'."""
-        job_fetcher.process_job(sample_job)
-
-        mock_job_repository.update_job_status.assert_called_with('JOB-123', 'queued')
+        # Status is now claimed atomically during fetch, no explicit update_job_status call
+        mock_job_repository.update_job_status.assert_not_called()
 
     def test_process_job_handles_missing_github_repo(self, job_fetcher, mock_job_repository, mock_job_logger):
         """Test handling of job without github_repo."""
@@ -81,7 +76,6 @@ class TestJobFetcherWorker:
 
         # Should still process successfully (github_repo defaults to 'unknown')
         assert result is True
-        mock_job_repository.update_job_status.assert_called_with('JOB-NO-REPO', 'queued')
 
     def test_process_job_handles_missing_commit_sha(self, job_fetcher, mock_job_repository):
         """Test handling of job without commit_sha."""
@@ -93,7 +87,6 @@ class TestJobFetcherWorker:
         result = job_fetcher.process_job(job)
 
         assert result is True
-        mock_job_repository.update_job_status.assert_called_with('JOB-NO-SHA', 'queued')
 
 class TestJobFetcherMain:
     """Test cases for main function."""

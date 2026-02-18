@@ -79,8 +79,6 @@ class AIAgentWorker(AIWorkerBase):
                 metadata={"repo_path": str(repo_path), "workspace_id": workspace_id}
             )
 
-            job_repository.update_job_status(job_id=job_id, status='analyzing')
-
             # Run analysis
             self.job_logger.info(job_id, "ai_analysis", "Running AI agents", progress=30)
 

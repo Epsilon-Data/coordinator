@@ -30,17 +30,31 @@ logger = logging.getLogger("epsilon.executor")
 # Encryption constants
 RSA_KEY_SIZE_BITS = 2048
 
+def _safe_int_env(name: str, default: int, min_val: int = 1, max_val: int = 3600) -> int:
+    """Parse an integer env var with bounds validation."""
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"Invalid {name}={raw!r}, using default {default}")
+        return default
+    if value < min_val or value > max_val:
+        logger.warning(f"{name}={value} out of range [{min_val}, {max_val}], using default {default}")
+        return default
+    return value
+
+
 # Network constants (configurable via env vars)
-VSOCK_TIMEOUT_SECONDS = int(os.getenv('VSOCK_TIMEOUT_SECONDS', '300'))
+VSOCK_TIMEOUT_SECONDS = _safe_int_env('VSOCK_TIMEOUT_SECONDS', 300, min_val=1, max_val=600)
 VSOCK_RECV_BUFFER_BYTES = 4 * 1024 * 1024
-HEALTH_CHECK_TIMEOUT_SECONDS = int(os.getenv('HEALTH_CHECK_TIMEOUT_SECONDS', '5'))
+HEALTH_CHECK_TIMEOUT_SECONDS = _safe_int_env('HEALTH_CHECK_TIMEOUT_SECONDS', 5, min_val=1, max_val=60)
 HTTP_ERROR_THRESHOLD = 400
 HTTP_RETRY_STATUS_CODES = {502, 503, 504}
-HTTP_MAX_RETRIES = int(os.getenv('HTTP_MAX_RETRIES', '3'))
+HTTP_MAX_RETRIES = _safe_int_env('HTTP_MAX_RETRIES', 3, min_val=0, max_val=10)
 HTTP_RETRY_BASE_DELAY = 1.0  # seconds
 
 # Script execution constants
-SCRIPT_TIMEOUT_SECONDS = int(os.getenv('SCRIPT_TIMEOUT_SECONDS', '60'))
+SCRIPT_TIMEOUT_SECONDS = _safe_int_env('SCRIPT_TIMEOUT_SECONDS', 60, min_val=1, max_val=3600)
 BUILD_YML_PATH = 'build.yml'
 CSV_OUTPUT_PATH = 'generated/data.csv'
 
@@ -58,7 +72,7 @@ class EnclaveClient(IEnclaveClient):
         self._crypto = CryptoService()
         # Use provided CID, or external CID from settings, or auto-detect
         self.enclave_cid = enclave_cid or self._settings.enclave.external_enclave_cid or self._get_enclave_cid()
-        self._connected = True
+        self._connected = False
         logger.info(f"[ENCLAVE] Initialized with CID: {self.enclave_cid}")
 
     def get_public_key(self, job_id: str) -> Tuple[str, str]:
@@ -224,14 +238,22 @@ class EnclaveClient(IEnclaveClient):
         finally:
             sock.close()
 
+    MAX_RESPONSE_SIZE = 100 * 1024 * 1024  # 100 MB
+
     def _recv_all(self, sock: socket.socket) -> bytes:
         """Receive complete response with chunked reading."""
         chunks = []
+        total_size = 0
         while True:
             try:
                 chunk = sock.recv(65536)  # 64KB chunks
                 if not chunk:
                     break
+                total_size += len(chunk)
+                if total_size > self.MAX_RESPONSE_SIZE:
+                    raise MemoryError(
+                        f"Response exceeded max size ({self.MAX_RESPONSE_SIZE // (1024*1024)} MB)"
+                    )
                 chunks.append(chunk)
             except socket.timeout:
                 # If we have data and timeout, assume complete
@@ -397,6 +419,10 @@ class EnclaveClientLocal(IEnclaveClient):
             zip_path.write_bytes(zip_data)
 
             with zipfile.ZipFile(zip_path, 'r') as zipf:
+                for member in zipf.namelist():
+                    member_path = (temp_path / member).resolve()
+                    if not member_path.is_relative_to(temp_path.resolve()):
+                        raise ValueError(f"Zip member escapes target dir: {member}")
                 zipf.extractall(temp_path)
 
             if csv_data:

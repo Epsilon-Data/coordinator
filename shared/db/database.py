@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 import json
 
-from sqlalchemy import create_engine, select, update, and_, text
+from sqlalchemy import create_engine, select, update, and_
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -51,63 +51,9 @@ class Database:
         finally:
             session.close()
 
-    @contextmanager
-    def get_cursor(self):
-        """
-        Backward compatibility method that mimics the old cursor interface
-        Returns a session that can be used like the old cursor
-        """
-        with self.get_session() as session:
-            # Create a cursor-like object that maintains the same interface
-            cursor = SQLAlchemyCursor(session)
-            yield cursor
-
     def close(self):
         """Close the database engine"""
         self.engine.dispose()
-
-
-class SQLAlchemyCursor:
-    """
-    Wrapper to make SQLAlchemy session behave like the old psycopg2 cursor
-    This maintains backward compatibility with existing code
-    """
-
-    def __init__(self, session: Session):
-        self.session = session
-        self._last_result = None
-
-    def execute(self, query: str, params: dict = None):
-        """Execute a query with optional parameters"""
-        try:
-            if params:
-                result = self.session.execute(text(query), params)
-            else:
-                result = self.session.execute(text(query))
-            self._last_result = result
-            return result
-        except SQLAlchemyError as e:
-            logger.error(f"SQL execution error: {e}")
-            raise
-
-    def fetchone(self):
-        """Fetch one result"""
-        if self._last_result:
-            row = self._last_result.fetchone()
-            if row:
-                return dict(row._mapping)
-        return None
-
-    def fetchall(self):
-        """Fetch all results"""
-        if self._last_result:
-            rows = self._last_result.fetchall()
-            return [dict(row._mapping) for row in rows]
-        return []
-
-    def close(self):
-        """Close cursor (no-op for session)"""
-        pass
 
 
 class JobRepository:
@@ -260,11 +206,14 @@ class JobRepository:
         self,
         status: str,
         limit: int = 10,
+        claim_status: Optional[str] = None,
         additional_fields: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Fetch jobs by status with workspace information using row-level locking.
-        Clean SQLAlchemy 2.0 implementation.
+
+        If claim_status is provided, atomically updates matched rows to that status
+        within the same transaction to prevent duplicate processing by concurrent workers.
         """
         with self.db.get_session() as session:
             # Build the query with join
@@ -280,7 +229,13 @@ class JobRepository:
             result = session.execute(stmt).all()
 
             jobs = []
+            now = datetime.now(timezone.utc)
             for job_request, workspace in result:
+                # Claim the row in the same transaction to prevent races
+                if claim_status:
+                    job_request.status = claim_status
+                    job_request.updated_at = now
+
                 job_dict = self._job_to_dict(job_request)
                 # Add workspace fields
                 job_dict['github_repo'] = workspace.github_repo
@@ -288,25 +243,26 @@ class JobRepository:
                 jobs.append(job_dict)
 
             if jobs:
-                logger.debug(f"Fetched {len(jobs)} jobs with status '{status}'")
+                logger.debug(f"Fetched {len(jobs)} jobs with status '{status}'"
+                             + (f" → claimed as '{claim_status}'" if claim_status else ""))
 
             return jobs
 
     def fetch_pending_jobs(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Fetch pending jobs for job-fetcher worker"""
-        return self.fetch_jobs_by_status_with_workspace('pending', limit)
+        return self.fetch_jobs_by_status_with_workspace('pending', limit, claim_status='queued')
 
     def fetch_queued_jobs(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Fetch queued jobs for clone worker"""
-        return self.fetch_jobs_by_status_with_workspace('queued', limit)
+        return self.fetch_jobs_by_status_with_workspace('queued', limit, claim_status='cloning')
 
     def fetch_cloned_jobs(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Fetch cloned jobs for AI agent worker"""
-        return self.fetch_jobs_by_status_with_workspace('cloned', limit)
+        return self.fetch_jobs_by_status_with_workspace('cloned', limit, claim_status='analyzing')
 
     def fetch_ai_approved_jobs(self, limit: int = 1) -> List[Dict[str, Any]]:
         """Fetch AI approved jobs for executor worker"""
-        return self.fetch_jobs_by_status_with_workspace('ai_approved', limit)
+        return self.fetch_jobs_by_status_with_workspace('ai_approved', limit, claim_status='executing')
 
     def _job_to_dict(self, job: JobRequest) -> Dict[str, Any]:
         """Convert JobRequest model to dictionary for backward compatibility"""

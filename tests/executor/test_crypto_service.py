@@ -102,19 +102,19 @@ class TestCryptoService:
         encrypted = crypto_service.encrypt(data, public_key1)
 
         # Should raise an error when decrypting with wrong key
-        with pytest.raises(Exception):  # ValueError or cryptography exception
+        with pytest.raises(ValueError):
             crypto_service.decrypt(encrypted, private_key2)
 
     def test_invalid_public_key_format(self, crypto_service):
         """Test that invalid public key raises error."""
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             crypto_service.encrypt(b"data", "not-a-valid-key")
 
     def test_invalid_encrypted_data(self, crypto_service):
         """Test that invalid encrypted data raises error."""
         private_key, _ = crypto_service.generate_keypair()
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             crypto_service.decrypt("not-valid-base64!", private_key)
 
     def test_encrypted_structure(self, crypto_service):
