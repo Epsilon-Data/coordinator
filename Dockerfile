@@ -29,9 +29,9 @@ COPY entrypoint.py .
 RUN pip install --no-cache-dir -e .[all]
 
 # Create necessary directories and non-root user
-RUN mkdir -p /app/logs /app/artifacts /app/repositories \
+RUN mkdir -p /app/logs /app/artifacts /app/repositories /shared/epsilon \
     && useradd --create-home --shell /bin/bash --uid 1000 appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app /shared/epsilon
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

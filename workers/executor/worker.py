@@ -174,8 +174,6 @@ class ExecutorWorker(ExecutorWorkerBase):
             job_request = JobExecutionRequest(
                 job_id=job_id,
                 repo_path=repo_path,
-                script_path=None,
-                data_path=None,
                 workspace_id=job['workspace_id'],
                 ai_decision={
                     'commit_sha': job['commit_sha'],
