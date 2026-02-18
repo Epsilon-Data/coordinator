@@ -106,7 +106,7 @@ epsilon-coordinator/
     config.py            # Environment configuration
     base_worker.py       # Base worker polling loop
   workers/
-    fetcher/             # Job fetcher (pending -> queued)
+    job_fetcher/         # Job fetcher (pending -> queued)
     clone/               # Repository cloner (queued -> cloned)
     executor/            # Enclave executor (cloned -> success/failed)
       executor.py        # Core execution flow (validate, encrypt, send)
@@ -115,6 +115,9 @@ epsilon-coordinator/
       services.py        # Build validation, zip service
     ai_agent/            # Optional AI validation worker
   migrations/            # Alembic database migrations
+  scripts/
+    deploy-ec2.sh        # EC2 deployment automation
+    collect_metrics.sql   # Performance metrics queries
   docker-compose.yml     # Production service definitions
   Dockerfile             # Single image for all workers
   entrypoint.py          # Worker mode router
@@ -150,6 +153,8 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/). 
 3. Start the vsock proxy: `vsock-proxy 8000 kms.<region>.amazonaws.com 443`
 4. Start the enclave: `nitro-cli run-enclave --eif-path epsilon-enclave.eif --cpu-count 2 --memory 512`
 5. Deploy the coordinator: `docker compose up -d`
+
+An automated setup script is also available: `./scripts/deploy-ec2.sh`
 
 ### Docker Image
 

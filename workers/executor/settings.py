@@ -36,11 +36,11 @@ class EnclaveConfig:
     cpu_count: int = field(default_factory=lambda: int(os.getenv('ENCLAVE_CPU_COUNT', '2')))
     eif_path: str = field(default_factory=lambda: os.getenv('ENCLAVE_EIF_PATH', '/opt/enclaves/executor.eif'))
     kms_proxy_port: int = field(default_factory=lambda: int(os.getenv('KMS_PROXY_PORT', '8000')))
-    vsock_port: int = field(default_factory=lambda: int(os.getenv('VSOCK_PORT', '5005')))
-    debug_mode: bool = field(default_factory=lambda: os.getenv('ENCLAVE_DEBUG', 'false').lower() == 'true')
-    use_local_client: bool = field(default_factory=lambda: os.getenv('USE_LOCAL_ENCLAVE', 'false').lower() == 'true')
+    vsock_port: int = field(default_factory=lambda: int(os.getenv('ENCLAVE_VSOCK_PORT', '5005')))
+    debug_mode: bool = field(default_factory=lambda: os.getenv('ENCLAVE_DEBUG', 'false').lower() in ('true', '1', 'yes'))
+    use_local_client: bool = field(default_factory=lambda: os.getenv('USE_LOCAL_ENCLAVE', 'false').lower() in ('true', '1', 'yes'))
     # External enclave mode: enclave is managed separately (not launched by executor)
-    use_external_enclave: bool = field(default_factory=lambda: os.getenv('USE_EXTERNAL_ENCLAVE', 'false').lower() == 'true')
+    use_external_enclave: bool = field(default_factory=lambda: os.getenv('USE_EXTERNAL_ENCLAVE', 'false').lower() in ('true', '1', 'yes'))
     external_enclave_cid: Optional[int] = field(default_factory=lambda: int(os.getenv('ENCLAVE_CID', '0')) if os.getenv('ENCLAVE_CID') else None)
 
 

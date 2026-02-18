@@ -146,7 +146,7 @@ epsilon-coordinator/
   workers/
     executor/       # Enclave execution worker
     clone/          # Repository clone worker
-    fetcher/        # Job fetcher worker
+    job_fetcher/    # Job fetcher worker
     ai_agent/       # AI validation worker (optional)
   migrations/       # Alembic database migrations
   scripts/          # Utility scripts
