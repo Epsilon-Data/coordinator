@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.2](https://github.com/Epsilon-Data/coordinator/compare/v1.0.1...v1.0.2) (2026-02-18)
+
+
+### Bug Fixes
+
+* **executor:** remove explicit None for script_path and fix Docker volume permissions ([57e87fb](https://github.com/Epsilon-Data/coordinator/commit/57e87fbb9ae1ae829370d1b548124a954c0d3deb))
+
 ## [1.0.1](https://github.com/Epsilon-Data/coordinator/compare/v1.0.0...v1.0.1) (2026-02-18)
 
 
