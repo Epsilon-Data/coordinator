@@ -45,6 +45,7 @@ class TestSecureExecutor:
         response.encrypted_csv = 'encrypted_csv_base64'
         response.error = None
         response.is_direct_db = False
+        response.is_proxy = False
         response.mode = 'legacy'
         client.fetch_encrypted_csv.return_value = response
         return client
@@ -199,6 +200,7 @@ datasets: []
         response.success = False
         response.error = 'Dataset not found'
         response.is_direct_db = False
+        response.is_proxy = False
         mock_middleware_client.fetch_encrypted_csv.return_value = response
 
         result = secure_executor.execute(sample_request)
@@ -213,6 +215,7 @@ datasets: []
         response.encrypted_csv = ''
         response.error = None
         response.is_direct_db = False
+        response.is_proxy = False
         response.mode = 'legacy'
         mock_middleware_client.fetch_encrypted_csv.return_value = response
 
