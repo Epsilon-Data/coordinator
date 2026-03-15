@@ -7,7 +7,7 @@ from typing import Optional
 from workers.executor.settings import Settings, get_settings
 from workers.executor.interfaces import IExecutor, IEnclaveClient, IMiddlewareClient
 from workers.executor.exceptions import ConfigurationError
-from workers.executor.clients import EnclaveClient, EnclaveClientLocal, MiddlewareClient
+from workers.executor.clients import EnclaveClient, EnclaveClientLocal, MiddlewareClient, ProxyClient
 from workers.executor.executor import SecureExecutor
 
 logger = logging.getLogger("epsilon.executor")
@@ -82,6 +82,31 @@ class MiddlewareClientFactory:
         )
 
 
+class ProxyClientFactory:
+    """Factory for creating proxy client."""
+
+    @staticmethod
+    def create_client(settings: Optional[Settings] = None) -> Optional[ProxyClient]:
+        """
+        Create proxy client if proxy is enabled.
+
+        Args:
+            settings: Optional settings object
+
+        Returns:
+            ProxyClient instance if enabled, None otherwise
+        """
+        settings = settings or get_settings()
+        proxy_config = settings.proxy
+
+        if not proxy_config.enabled:
+            logger.info("[PROXY] Proxy is disabled")
+            return None
+
+        logger.info(f"[PROXY] Creating proxy client (timeout={proxy_config.request_timeout_seconds}s)")
+        return ProxyClient(settings=proxy_config)
+
+
 class ExecutorFactory:
     """Factory for creating job executor instances."""
 
@@ -89,7 +114,8 @@ class ExecutorFactory:
     def create_executor(
         settings: Optional[Settings] = None,
         enclave_client: Optional[IEnclaveClient] = None,
-        middleware_client: Optional[IMiddlewareClient] = None
+        middleware_client: Optional[IMiddlewareClient] = None,
+        proxy_client: Optional[ProxyClient] = None
     ) -> IExecutor:
         """
         Create a job executor with all dependencies.
@@ -98,6 +124,7 @@ class ExecutorFactory:
             settings: Settings instance (uses default if None)
             enclave_client: Pre-configured enclave client (creates new if None)
             middleware_client: Pre-configured middleware client (creates new if None)
+            proxy_client: Pre-configured proxy client (creates new if None and proxy enabled)
 
         Returns:
             Configured job executor
@@ -112,17 +139,25 @@ class ExecutorFactory:
             if middleware_client is None:
                 middleware_client = MiddlewareClientFactory.create_client(settings)
 
+            if proxy_client is None:
+                proxy_client = ProxyClientFactory.create_client(settings)
+
             logger.info("Creating SecureExecutor with configured dependencies")
             logger.info(f"  - Enclave client: {type(enclave_client).__name__}")
             if middleware_client:
                 logger.info(f"  - Middleware client: {type(middleware_client).__name__}")
             else:
                 logger.info("  - Middleware client: disabled")
+            if proxy_client:
+                logger.info(f"  - Proxy client: {type(proxy_client).__name__}")
+            else:
+                logger.info("  - Proxy client: disabled")
 
             return SecureExecutor(
                 enclave_client=enclave_client,
                 settings=settings,
-                middleware_client=middleware_client
+                middleware_client=middleware_client,
+                proxy_client=proxy_client
             )
 
         except Exception as e:

@@ -2,11 +2,19 @@
 Interface definitions for executor worker.
 """
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field as dc_field
 from typing import Dict, Any, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
 from workers.executor.models import JobExecutionRequest, ExecutionResult
+
+
+@dataclass
+class ProxyResponse:
+    """Response from proxy tunnel query."""
+    encrypted_csv: str
+    metadata: dict = dc_field(default_factory=dict)
 
 
 # Middleware models
@@ -30,9 +38,11 @@ class MiddlewareResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if failed")
     request_id: Optional[str] = Field(default=None, description="Request tracking ID")
     # direct_db mode fields
-    mode: str = Field(default="legacy", description="Response mode: 'legacy' or 'direct_db'")
+    mode: str = Field(default="legacy", description="Response mode: 'legacy', 'direct_db', or 'proxy'")
     encrypted_credentials: Optional[str] = Field(default=None, description="Encrypted DB credentials (direct_db mode)")
     sql_query: Optional[str] = Field(default=None, description="SQL query string (direct_db mode)")
+    # proxy mode fields
+    proxy_info: Optional[Dict[str, Any]] = Field(default=None, description="Proxy tunnel info (proxy mode)")
 
     model_config = {"frozen": False, "extra": "ignore"}
 
@@ -45,6 +55,11 @@ class MiddlewareResponse(BaseModel):
     def is_direct_db(self) -> bool:
         """Check if this is a direct_db mode response."""
         return self.mode == "direct_db"
+
+    @property
+    def is_proxy(self) -> bool:
+        """Check if this is a proxy mode response."""
+        return self.mode == "proxy"
 
 
 class IExecutor(ABC):

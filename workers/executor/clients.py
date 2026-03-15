@@ -1,6 +1,8 @@
 """
 Client implementations for executor worker: enclave and middleware clients.
 """
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -20,9 +22,9 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
-from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse
+from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
 from workers.executor.exceptions import EnclaveConnectionError
-from workers.executor.settings import get_settings
+from workers.executor.settings import get_settings, ProxyConfig
 
 logger = logging.getLogger("epsilon.executor")
 
@@ -756,3 +758,124 @@ class MiddlewareClient(IMiddlewareClient):
     @property
     def is_enabled(self) -> bool:
         return bool(self._endpoint_url)
+
+
+# =============================================================================
+# Proxy Client
+# =============================================================================
+class ProxyClient:
+    """Client for communicating with data owner proxies via local tunnel."""
+
+    def __init__(self, settings: ProxyConfig):
+        self._settings = settings
+        self._timeout = settings.request_timeout_seconds
+        logger.info(f"[PROXY] Initialized (enabled={settings.enabled}, timeout={self._timeout}s)")
+
+    def fetch_encrypted_csv(
+        self,
+        request: MiddlewareRequest,
+        public_key: str,
+        attestation_doc: str,
+        proxy_info: dict
+    ) -> ProxyResponse:
+        """Fetch encrypted CSV data through the proxy tunnel.
+
+        Args:
+            request: The middleware request containing job_id, dataset_id, etc.
+            public_key: Enclave public key for encryption.
+            attestation_doc: Enclave attestation document.
+            proxy_info: Proxy tunnel info including 'assigned_port' and 'proxy_token'.
+
+        Returns:
+            ProxyResponse with encrypted_csv and metadata.
+        """
+        assigned_port = proxy_info['assigned_port']
+        proxy_token = proxy_info.get('proxy_token', '')
+        session_id = proxy_info.get('session_id', '')
+        sql_query = proxy_info.get('sql_query', '')
+
+        timestamp = str(int(time.time()))
+        request_id = f"coord-{request.job_id}-{timestamp}"
+
+        url = f"http://localhost:{assigned_port}/query"
+
+        payload = {
+            'request_id': request_id,
+            'session_id': session_id,
+            'sql_query': sql_query,
+            'enclave_public_key': public_key,
+            'attestation_document': attestation_doc,
+            'timestamp': int(timestamp)
+        }
+
+        # HMAC-SHA256 signature: sign(proxy_token, request_id + session_id + timestamp)
+        sign_data = request_id + session_id + timestamp
+        signature = hmac.new(
+            proxy_token.encode('utf-8'),
+            sign_data.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Signature': signature,
+            'X-Request-ID': request_id
+        }
+
+        logger.info(f"[PROXY] POST {url} (request_id={request_id})")
+
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self._timeout
+            )
+
+            if response.status_code >= HTTP_ERROR_THRESHOLD:
+                error_msg = f"Proxy returned HTTP {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', error_msg)
+                except Exception:
+                    pass
+                raise RuntimeError(f"[PROXY] Query failed: {error_msg}")
+
+            data = response.json()
+
+            if not data.get('success', False):
+                raise RuntimeError(f"[PROXY] Query failed: {data.get('error', 'Unknown error')}")
+
+            encrypted_csv = data.get('encrypted_csv', '')
+            metadata = data.get('metadata', {})
+
+            logger.info(f"[PROXY] Received encrypted CSV ({len(encrypted_csv)} chars)")
+
+            return ProxyResponse(
+                encrypted_csv=encrypted_csv,
+                metadata=metadata
+            )
+
+        except requests.exceptions.Timeout:
+            raise RuntimeError(f"[PROXY] Request timeout after {self._timeout}s")
+        except requests.exceptions.ConnectionError as e:
+            raise RuntimeError(f"[PROXY] Cannot connect to proxy at port {assigned_port}: {e}")
+
+    def health_check(self, proxy_info: dict) -> bool:
+        """Check if the proxy tunnel is healthy.
+
+        Args:
+            proxy_info: Proxy tunnel info including 'assigned_port'.
+
+        Returns:
+            True if healthy, False otherwise.
+        """
+        assigned_port = proxy_info['assigned_port']
+        url = f"http://localhost:{assigned_port}/health"
+
+        try:
+            response = requests.get(url, timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
+            return response.status_code == 200
+        except Exception as e:
+            logger.warning(f"[PROXY] Health check failed for port {assigned_port}: {e}")
+            return False

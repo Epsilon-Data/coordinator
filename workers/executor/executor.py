@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from workers.executor.settings import Settings
-from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse
+from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
 from workers.executor.models import JobExecutionRequest, ExecutionResult, BuildConfig, JobStatus
 from workers.executor.exceptions import BuildValidationError
 from workers.executor.services import BuildValidator, ZipService
@@ -42,16 +42,18 @@ class SecureExecutor(IExecutor):
         self,
         enclave_client: IEnclaveClient,
         settings: Settings,
-        middleware_client: IMiddlewareClient
+        middleware_client: IMiddlewareClient,
+        proxy_client=None
     ):
         self._enclave_client = enclave_client
         self._settings = settings
         self._middleware_client = middleware_client
+        self._proxy_client = proxy_client
         self._zip_service = ZipService()
         self._log = JobLogger("ExecutorWorker")
         self._active_jobs: Dict[str, Dict[str, Any]] = {}
 
-        logger.info("SecureExecutor initialized")
+        logger.info(f"SecureExecutor initialized (proxy={'enabled' if proxy_client else 'disabled'})")
 
     def execute(self, request: JobExecutionRequest) -> ExecutionResult:
         """Execute a job with Zero Trust security model."""
@@ -72,9 +74,10 @@ class SecureExecutor(IExecutor):
             public_key, session_id = self._step_get_public_key(job_id)
             step_timing['get_public_key_ms'] = round((time.time() - t0) * 1000, 2)
 
-            # Determine mode based on feature flag
+            # Determine mode based on feature flags
             use_direct_db = self._settings.middleware.use_direct_db
             mode = "direct_db" if use_direct_db else "legacy"
+            # Note: proxy mode is determined by middleware response, not a feature flag
 
             # Step 3: Fetch from middleware (mode-dependent)
             t0 = time.time()
@@ -90,7 +93,17 @@ class SecureExecutor(IExecutor):
 
             # Step 5: Execute in enclave (branch on mode)
             t0 = time.time()
-            if middleware_response and middleware_response.is_direct_db:
+            if middleware_response and middleware_response.is_proxy:
+                # Proxy mode: fetch encrypted CSV through proxy tunnel, then use legacy enclave path
+                proxy_response = self._step_fetch_from_proxy(
+                    job_id, request, public_key, middleware_response.proxy_info
+                )
+                step_timing['proxy_fetch_ms'] = round((time.time() - t0) * 1000, 2)
+                t0 = time.time()
+                success, output, attestation, enclave_timing = self._step_execute_in_enclave(
+                    job_id, session_id, encrypted_zip, proxy_response.encrypted_csv
+                )
+            elif middleware_response and middleware_response.is_direct_db:
                 success, output, attestation, enclave_timing = self._step_execute_in_enclave_db_fetch(
                     job_id, session_id, encrypted_zip,
                     middleware_response.encrypted_credentials,
@@ -206,6 +219,78 @@ class SecureExecutor(IExecutor):
         except Exception as e:
             self._log.error(job_id, "middleware", f"Failed to fetch from middleware: {e}", error=e)
             raise BuildValidationError(f"Failed to fetch from middleware: {e}")
+
+    def _step_fetch_from_proxy(
+        self, job_id: str, request: JobExecutionRequest,
+        public_key: str, proxy_info: dict
+    ) -> ProxyResponse:
+        """Step 5a (proxy): Fetch encrypted CSV through proxy tunnel.
+
+        Gets attestation from enclave, then sends query through the proxy tunnel
+        to the data owner's database. Returns ProxyResponse with encrypted CSV.
+        """
+        self._log.info(job_id, "proxy", "Fetching data through proxy tunnel", progress=85)
+
+        if not self._proxy_client:
+            raise RuntimeError("Proxy client not configured but proxy mode requested")
+
+        try:
+            import hashlib
+            import base64
+
+            # Get attestation document with public key hash bound to it.
+            # This lets the proxy verify:
+            #   1. The attestation is from a real Nitro enclave (AWS root cert)
+            #   2. The public key hash in user_data matches the public key we send
+            #   3. Therefore the public key was generated inside the enclave
+            attestation_doc = ""
+            try:
+                public_key_hash = hashlib.sha256(public_key.encode()).digest()
+                attestation_response = self._enclave_client._send_to_enclave({
+                    'operation': 'get_attestation',
+                    'user_data': base64.b64encode(public_key_hash).decode()
+                })
+                if attestation_response.get('attestation'):
+                    attestation_doc = attestation_response['attestation'].get('attestation_document', '')
+                logger.info(f"[PROXY] Attestation with public key binding generated")
+            except Exception as e:
+                logger.warning(f"[PROXY] Could not get attestation document: {e}")
+
+            # Build middleware request for proxy
+            dataset = None
+            if hasattr(request, 'datasets') and request.datasets:
+                dataset = request.datasets[0]
+
+            middleware_request = MiddlewareRequest(
+                dataset_id=proxy_info.get('dataset_id', ''),
+                archetype_id=proxy_info.get('archetype_id', ''),
+                public_key=public_key,
+                job_id=job_id,
+                workspace_id=request.workspace_id
+            )
+
+            # Health check before query
+            if not self._proxy_client.health_check(proxy_info):
+                logger.warning(f"[PROXY] Health check failed for port {proxy_info.get('assigned_port')}, proceeding anyway")
+
+            proxy_response = self._proxy_client.fetch_encrypted_csv(
+                request=middleware_request,
+                public_key=public_key,
+                attestation_doc=attestation_doc,
+                proxy_info=proxy_info
+            )
+
+            self._log.info(
+                job_id, "proxy",
+                f"Received encrypted CSV from proxy ({len(proxy_response.encrypted_csv)} chars)",
+                progress=90
+            )
+
+            return proxy_response
+
+        except Exception as e:
+            self._log.error(job_id, "proxy", f"Failed to fetch from proxy: {e}", error=e)
+            raise
 
     def _step_zip_and_encrypt(self, job_id: str, repo_path: str, public_key: str) -> str:
         """Step 4: Zip and encrypt build folder."""

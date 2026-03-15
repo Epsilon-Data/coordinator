@@ -83,6 +83,13 @@ class MiddlewareConfig:
 
 
 @dataclass
+class ProxyConfig:
+    """Proxy tunnel configuration for data owner connections."""
+    enabled: bool = field(default_factory=lambda: os.getenv('PROXY_ENABLED', 'true').lower() == 'true')
+    request_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('PROXY_REQUEST_TIMEOUT', '120')))
+
+
+@dataclass
 class ExecutionConfig:
     """Execution-specific configuration."""
     script_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('SCRIPT_TIMEOUT', '300')))
@@ -114,6 +121,7 @@ class Settings:
     polling: PollingConfig = field(default_factory=PollingConfig)
     coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
     middleware: MiddlewareConfig = field(default_factory=MiddlewareConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
     worker_id: str = field(default_factory=lambda: os.getenv('WORKER_ID', 'executor-001'))
     environment: str = field(default_factory=lambda: os.getenv('ENVIRONMENT', 'development'))
@@ -132,6 +140,7 @@ class Settings:
             'polling': self.polling.__dict__,
             'coordinator': coordinator,
             'middleware': {k: v for k, v in self.middleware.__dict__.items() if k != 'endpoint_url'},
+            'proxy': self.proxy.__dict__,
             'worker_id': self.worker_id,
             'environment': self.environment,
             'job_fetch_mode': self.job_fetch_mode
