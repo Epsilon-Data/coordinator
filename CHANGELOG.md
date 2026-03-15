@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0](https://github.com/Epsilon-Data/coordinator/compare/v1.0.2...v1.1.0) (2026-03-15)
+
+
+### Features
+
+* **executor:** add proxy tunnel support for data owner connections ([f20d1e7](https://github.com/Epsilon-Data/coordinator/commit/f20d1e707bfd950f4ef70a4f204d33c305ae572a))
+* **executor:** add proxy tunnel support for data owner connections ([cd518b1](https://github.com/Epsilon-Data/coordinator/commit/cd518b1ca00f80260221b5621ce315df209e4450))
+
+
+### Bug Fixes
+
+* **tests:** update executor tests for proxy client parameter ([25786d7](https://github.com/Epsilon-Data/coordinator/commit/25786d7393b234d791dd2057025293f610bbb1a6))
+
 ## [1.0.2](https://github.com/Epsilon-Data/coordinator/compare/v1.0.1...v1.0.2) (2026-02-18)
 
 
