@@ -186,11 +186,11 @@ class TestExecutorFactory:
                 middleware_client=mock_middleware_client
             )
 
-            MockExecutor.assert_called_once_with(
-                enclave_client=mock_enclave_client,
-                settings=mock_settings,
-                middleware_client=mock_middleware_client
-            )
+            call_kwargs = MockExecutor.call_args[1]
+            assert call_kwargs['enclave_client'] is mock_enclave_client
+            assert call_kwargs['settings'] is mock_settings
+            assert call_kwargs['middleware_client'] is mock_middleware_client
+            assert 'proxy_client' in call_kwargs
             assert executor is mock_executor
 
     def test_create_executor_creates_enclave_client(self, mock_settings, mock_middleware_client):
