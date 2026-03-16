@@ -95,8 +95,18 @@ class SecureExecutor(IExecutor):
             t0 = time.time()
             if middleware_response and middleware_response.is_proxy:
                 # Proxy mode: fetch encrypted CSV through proxy tunnel, then use legacy enclave path
+                proxy_info = dict(middleware_response.proxy_info or {})
+                # Normalize camelCase → snake_case (middleware may return either)
+                if 'assignedPort' in proxy_info and 'assigned_port' not in proxy_info:
+                    proxy_info['assigned_port'] = proxy_info['assignedPort']
+                if 'proxyToken' in proxy_info and 'proxy_token' not in proxy_info:
+                    proxy_info['proxy_token'] = proxy_info['proxyToken']
+                # Ensure dataset info is available (from build config as fallback)
+                if not proxy_info.get('dataset_id') and build_config.datasets:
+                    proxy_info['dataset_id'] = build_config.datasets[0].dataset_id
+                    proxy_info['archetype_id'] = build_config.datasets[0].archetype_id
                 proxy_response = self._step_fetch_from_proxy(
-                    job_id, request, public_key, middleware_response.proxy_info
+                    job_id, request, public_key, proxy_info
                 )
                 step_timing['proxy_fetch_ms'] = round((time.time() - t0) * 1000, 2)
                 t0 = time.time()
