@@ -32,56 +32,9 @@ class ConfigurationError(ExecutorError):
     pass
 
 
-class ValidationError(ExecutorError):
-    """Raised when input validation fails."""
-
-    def __init__(self, message: str, field: Optional[str] = None, **kwargs):
-        super().__init__(message, **kwargs)
-        if field:
-            self.details['field'] = field
-
-
 class BuildValidationError(ExecutorError):
     """Raised when build folder validation fails."""
     pass
-
-
-class ExecutionError(ExecutorError):
-    """Raised when script execution fails."""
-
-    def __init__(
-        self,
-        message: str,
-        exit_code: Optional[int] = None,
-        stdout: Optional[str] = None,
-        stderr: Optional[str] = None,
-        **kwargs
-    ):
-        super().__init__(message, **kwargs)
-        if exit_code is not None:
-            self.details['exit_code'] = exit_code
-        if stdout:
-            self.details['stdout'] = stdout
-        if stderr:
-            self.details['stderr'] = stderr
-
-
-class EncryptionError(ExecutorError):
-    """Raised when encryption/decryption fails."""
-
-    def __init__(self, message: str, operation: Optional[str] = None, **kwargs):
-        super().__init__(message, **kwargs)
-        if operation:
-            self.details['operation'] = operation
-
-
-class ExecutorTimeoutError(ExecutorError):
-    """Raised when an operation times out."""
-
-    def __init__(self, message: str, timeout_seconds: Optional[int] = None, **kwargs):
-        super().__init__(message, **kwargs)
-        if timeout_seconds:
-            self.details['timeout_seconds'] = timeout_seconds
 
 
 # Enclave-specific exceptions
@@ -99,15 +52,6 @@ class EnclaveConnectionError(EnclaveError):
             self.details['cid'] = cid
         if port:
             self.details['port'] = port
-
-
-class EnclaveDecryptionError(EnclaveError):
-    """Raised when enclave decryption fails."""
-
-    def __init__(self, message: str, method: Optional[str] = None, **kwargs):
-        super().__init__(message, **kwargs)
-        if method:
-            self.details['encryption_method'] = method
 
 
 class EnclaveExecutionError(EnclaveError):

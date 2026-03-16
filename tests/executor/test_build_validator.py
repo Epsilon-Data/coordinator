@@ -196,33 +196,6 @@ datasets:
         with pytest.raises(BuildValidationError, match="must be a dictionary"):
             validator.validate()
 
-    def test_has_datasets_property(self, temp_repo, valid_build_yml):
-        """Test has_datasets property."""
-        (temp_repo / 'build' / 'build.yml').write_text(valid_build_yml)
-
-        validator = BuildValidator(str(temp_repo))
-
-        assert validator.has_datasets is True
-
-    def test_has_datasets_empty(self, temp_repo):
-        """Test has_datasets property when no datasets."""
-        yml_content = """
-analysis:
-  script_file: main.py
-datasets: []
-"""
-        (temp_repo / 'build' / 'build.yml').write_text(yml_content)
-
-        validator = BuildValidator(str(temp_repo))
-
-        assert validator.has_datasets is False
-
-    def test_has_datasets_no_build_yml(self, temp_repo):
-        """Test has_datasets property when build.yml doesn't exist."""
-        validator = BuildValidator(str(temp_repo))
-
-        assert validator.has_datasets is False
-
     def test_validate_dataset_optional_fields(self, temp_repo):
         """Test that optional dataset fields are parsed correctly."""
         yml_content = """

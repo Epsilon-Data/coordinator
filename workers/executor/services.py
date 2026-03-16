@@ -148,13 +148,6 @@ class BuildValidator:
             ))
         return datasets
 
-    @property
-    def has_datasets(self) -> bool:
-        try:
-            data = self._load_build_yml()
-            return bool(data.get('datasets'))
-        except BuildValidationError:
-            return False
 
 
 # =============================================================================
@@ -177,6 +170,8 @@ class ZipResult:
 
 class ZipService:
     """Service for creating ZIP archives of directories."""
+
+    MAX_BUILD_SIZE = 100 * 1024 * 1024  # 100 MB
 
     DEFAULT_EXCLUDES: Set[str] = {
         '__pycache__', '.git', '.DS_Store', '*.pyc', '*.pyo', '.env', 'node_modules',
@@ -219,6 +214,14 @@ class ZipService:
                         files_added += 1
                         total_size += file_size
                         logger.debug(f"Added: {arcname} ({file_size} bytes)")
+                        # Check accumulated zip size against limit
+                        if buffer.tell() > self.MAX_BUILD_SIZE:
+                            raise ValueError(
+                                f"Build archive exceeds maximum size of "
+                                f"{self.MAX_BUILD_SIZE // (1024 * 1024)} MB"
+                            )
+                    except ValueError:
+                        raise
                     except Exception as e:
                         logger.warning(f"Failed to add {file_path}: {e}")
 

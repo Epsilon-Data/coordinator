@@ -111,7 +111,3 @@ class BuildConfig(BaseModel):
             raise ValueError("Epsilon must be positive")
         return v
 
-    @property
-    def has_datasets(self) -> bool:
-        """Check if build has datasets configured."""
-        return len(self.datasets) > 0

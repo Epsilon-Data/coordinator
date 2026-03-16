@@ -5,8 +5,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field as dc_field
 from typing import Dict, Any, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from workers.executor.constants import MiddlewareModes
 from workers.executor.models import JobExecutionRequest, ExecutionResult
 
 
@@ -15,6 +16,22 @@ class ProxyResponse:
     """Response from proxy tunnel query."""
     encrypted_csv: str
     metadata: dict = dc_field(default_factory=dict)
+
+
+class ProxyInfo(BaseModel):
+    """Proxy tunnel connection info from middleware.
+
+    Accepts both camelCase (from middleware JSON) and snake_case field names.
+    """
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    assigned_port: int = Field(..., alias="assignedPort", description="Assigned proxy tunnel port")
+    proxy_token: str = Field(default="", alias="proxyToken", description="HMAC authentication token")
+    session_id: str = Field(default="", alias="sessionId", description="Proxy session identifier")
+    sql_query: str = Field(default="", alias="sqlQuery", description="SQL query for the proxy")
+    dataset_id: str = Field(default="", alias="datasetId", description="Dataset identifier")
+    archetype_id: str = Field(default="", alias="archetypeId", description="Archetype identifier")
+    status: Optional[str] = Field(default=None, description="Proxy tunnel status")
 
 
 # Middleware models
@@ -38,7 +55,7 @@ class MiddlewareResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if failed")
     request_id: Optional[str] = Field(default=None, description="Request tracking ID")
     # direct_db mode fields
-    mode: str = Field(default="legacy", description="Response mode: 'legacy', 'direct_db', or 'proxy'")
+    mode: str = Field(default=MiddlewareModes.LEGACY, description="Response mode: 'legacy', 'direct_db', or 'proxy'")
     encrypted_credentials: Optional[str] = Field(default=None, description="Encrypted DB credentials (direct_db mode)")
     sql_query: Optional[str] = Field(default=None, description="SQL query string (direct_db mode)")
     # proxy mode fields
@@ -54,12 +71,12 @@ class MiddlewareResponse(BaseModel):
     @property
     def is_direct_db(self) -> bool:
         """Check if this is a direct_db mode response."""
-        return self.mode == "direct_db"
+        return self.mode == MiddlewareModes.DIRECT_DB
 
     @property
     def is_proxy(self) -> bool:
         """Check if this is a proxy mode response."""
-        return self.mode == "proxy"
+        return self.mode == MiddlewareModes.PROXY
 
 
 class IExecutor(ABC):
@@ -152,7 +169,7 @@ class IMiddlewareClient(ABC):
     """Interface for middleware client."""
 
     @abstractmethod
-    def fetch_encrypted_csv(self, request: MiddlewareRequest, mode: str = "legacy") -> MiddlewareResponse:
+    def fetch_encrypted_csv(self, request: MiddlewareRequest, mode: str = MiddlewareModes.LEGACY) -> MiddlewareResponse:
         """Fetch data from middleware. Mode: 'legacy' (encrypted CSV) or 'direct_db' (encrypted credentials + SQL)."""
         pass
 
