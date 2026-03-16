@@ -684,6 +684,17 @@ class MiddlewareClient(IMiddlewareClient):
                         csv_metadata=data.get('metadata', {}),
                         request_id=response.headers.get('X-Request-ID', 'http-request')
                     )
+                elif response_mode == 'proxy':
+                    # Proxy mode: proxy connection info
+                    proxy_info = data.get('proxy_info', {})
+                    logger.info(f"[MIDDLEWARE] Proxy mode: port={proxy_info.get('assignedPort')}, status={proxy_info.get('status')}")
+                    return MiddlewareResponse(
+                        success=True,
+                        mode='proxy',
+                        proxy_info=proxy_info,
+                        csv_metadata=data.get('metadata', {}),
+                        request_id=response.headers.get('X-Request-ID', 'http-request')
+                    )
                 else:
                     # Legacy mode: encrypted CSV
                     encrypted_csv = data.get('csv', '')
