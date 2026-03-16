@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.3](https://github.com/Epsilon-Data/coordinator/compare/v1.1.2...v1.1.3) (2026-03-16)
+
+
+### Bug Fixes
+
+* **executor:** normalize proxy_info fields and fallback to build config ([2cb7527](https://github.com/Epsilon-Data/coordinator/commit/2cb7527a3656850673ccc19c759effc626e50b1e))
+* **executor:** normalize proxy_info fields and fallback to build config ([7dbd808](https://github.com/Epsilon-Data/coordinator/commit/7dbd8087e75b6d9b862dcc12e3bc3babc696367c))
+* **proxy:** send raw JSON user_data for attestation binding ([acb7941](https://github.com/Epsilon-Data/coordinator/commit/acb7941646c2b6542baf06a0092d1be6fdefc95f))
+* **proxy:** send raw JSON user_data for attestation binding ([621a1d0](https://github.com/Epsilon-Data/coordinator/commit/621a1d0664dde1d232b30c17fc0b10f5f91564ca))
+* **proxy:** use configurable rathole host for proxy tunnel and add lo… ([08a9e47](https://github.com/Epsilon-Data/coordinator/commit/08a9e4794aca62730e1d0f03795292bc04861b66))
+* **proxy:** use configurable rathole host for proxy tunnel and add logging ([69c9047](https://github.com/Epsilon-Data/coordinator/commit/69c904759d14c100ca651fe5c7e52f8f6ac82cd7))
+
 ## [1.1.2](https://github.com/Epsilon-Data/coordinator/compare/v1.1.1...v1.1.2) (2026-03-16)
 
 
