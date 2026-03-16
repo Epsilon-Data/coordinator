@@ -1,14 +1,11 @@
 """
-Utilities for executor worker: logging and decorators.
+Utilities for executor worker: logging configuration.
 """
-import functools
 import logging
 import logging.handlers
-import signal
 import sys
-import time
 from pathlib import Path
-from typing import Callable, Any, Optional, Type, Tuple
+from typing import Optional
 
 
 class ContextFilter(logging.Filter):
@@ -87,7 +84,6 @@ def get_logger(name: str) -> logging.Logger:
     Uses hierarchical naming under 'epsilon.executor' namespace.
     Example: get_logger(__name__) returns 'epsilon.executor.clients' for clients.py
     """
-    # Extract module name from full path (e.g., 'workers.executor.clients' -> 'clients')
     if name.startswith('workers.executor.'):
         short_name = name.replace('workers.executor.', '')
     elif '.' in name:
@@ -96,123 +92,3 @@ def get_logger(name: str) -> logging.Logger:
         short_name = name
 
     return logging.getLogger(f"epsilon.executor.{short_name}")
-
-
-class LogContext:
-    """Context manager for temporary log level changes."""
-
-    def __init__(self, logger: logging.Logger, level: str):
-        self.logger = logger
-        self.new_level = getattr(logging, level.upper())
-        self.original_level = None
-
-    def __enter__(self):
-        self.original_level = self.logger.level
-        self.logger.setLevel(self.new_level)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.logger.setLevel(self.original_level)
-
-
-# Decorators
-def retry(
-    max_attempts: int = 3,
-    delay: float = 1.0,
-    backoff: float = 2.0,
-    exceptions: Tuple[Type[Exception], ...] = (Exception,)
-):
-    """Retry decorator with exponential backoff."""
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> Any:
-            attempt = 1
-            current_delay = delay
-            logger = get_logger(__name__)
-
-            while attempt <= max_attempts:
-                try:
-                    return func(*args, **kwargs)
-                except exceptions as e:
-                    if attempt == max_attempts:
-                        logger.error(f"{func.__name__} failed after {max_attempts} attempts: {e}")
-                        raise
-
-                    logger.warning(
-                        f"{func.__name__} attempt {attempt} failed: {e}. "
-                        f"Retrying in {current_delay}s..."
-                    )
-                    time.sleep(current_delay)
-                    current_delay *= backoff
-                    attempt += 1
-
-        return wrapper
-    return decorator
-
-
-def timeout(seconds: int):
-    """Timeout decorator using signals (Unix only, main thread only)."""
-    def decorator(func: Callable) -> Callable:
-        def handler(signum, frame):
-            raise TimeoutError(f"{func.__name__} timed out after {seconds} seconds")
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> Any:
-            old_handler = signal.signal(signal.SIGALRM, handler)
-            signal.alarm(seconds)
-
-            try:
-                result = func(*args, **kwargs)
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-
-            return result
-
-        return wrapper
-    return decorator
-
-
-def measure_time(func: Callable) -> Callable:
-    """Decorator to measure function execution time."""
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs) -> Any:
-        logger = get_logger(__name__)
-        start_time = time.time()
-
-        try:
-            result = func(*args, **kwargs)
-            execution_time = time.time() - start_time
-            logger.info(f"{func.__name__} completed in {execution_time:.2f} seconds")
-            return result
-        except Exception as e:
-            execution_time = time.time() - start_time
-            logger.error(f"{func.__name__} failed after {execution_time:.2f} seconds: {e}")
-            raise
-
-    return wrapper
-
-
-def handle_exceptions(
-    default_return: Any = None,
-    log_errors: bool = True,
-    reraise: bool = False
-):
-    """Decorator to handle exceptions gracefully."""
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> Any:
-            logger = get_logger(__name__)
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                if log_errors:
-                    logger.error(f"Exception in {func.__name__}: {e}", exc_info=True)
-
-                if reraise:
-                    raise
-
-                return default_return
-
-        return wrapper
-    return decorator

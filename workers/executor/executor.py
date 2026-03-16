@@ -8,13 +8,16 @@ Flow:
 4. Package and encrypt build folder
 5. Send encrypted payloads to enclave for execution
 """
+import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from workers.executor.settings import Settings
-from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
+from workers.executor.constants import EnclaveOperations, MiddlewareModes
+from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyInfo, ProxyResponse
 from workers.executor.models import JobExecutionRequest, ExecutionResult, BuildConfig, JobStatus
 from workers.executor.exceptions import BuildValidationError
 from workers.executor.services import BuildValidator, ZipService
@@ -22,6 +25,41 @@ from workers.executor.utils import get_logger
 from shared.job_logger import JobLogger
 
 logger = get_logger(__name__)
+
+# SQL validation constants
+MAX_SQL_QUERY_LENGTH = 10000
+DANGEROUS_SQL_KEYWORDS = re.compile(
+    r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|TRUNCATE)\b',
+    re.IGNORECASE
+)
+
+
+def _validate_sql_query(sql_query: str) -> None:
+    """Validate that a SQL query is a safe read-only SELECT statement.
+
+    Raises:
+        ValueError: If the query fails validation.
+    """
+    stripped = sql_query.strip()
+
+    if not stripped:
+        raise ValueError("SQL query is empty")
+
+    if len(stripped) > MAX_SQL_QUERY_LENGTH:
+        raise ValueError(
+            f"SQL query exceeds maximum length ({len(stripped)} > {MAX_SQL_QUERY_LENGTH} chars)"
+        )
+
+    if not stripped.upper().startswith('SELECT'):
+        raise ValueError(
+            f"SQL query must start with SELECT, got: {stripped[:20]}..."
+        )
+
+    match = DANGEROUS_SQL_KEYWORDS.search(stripped)
+    if match:
+        raise ValueError(
+            f"SQL query contains dangerous keyword: {match.group(0)}"
+        )
 
 
 class SecureExecutor(IExecutor):
@@ -76,7 +114,7 @@ class SecureExecutor(IExecutor):
 
             # Determine mode based on feature flags
             use_direct_db = self._settings.middleware.use_direct_db
-            mode = "direct_db" if use_direct_db else "legacy"
+            mode = MiddlewareModes.DIRECT_DB if use_direct_db else MiddlewareModes.LEGACY
             # Note: proxy mode is determined by middleware response, not a feature flag
 
             # Step 3: Fetch from middleware (mode-dependent)
@@ -95,16 +133,16 @@ class SecureExecutor(IExecutor):
             t0 = time.time()
             if middleware_response and middleware_response.is_proxy:
                 # Proxy mode: fetch encrypted CSV through proxy tunnel, then use legacy enclave path
-                proxy_info = dict(middleware_response.proxy_info or {})
-                # Normalize camelCase → snake_case (middleware may return either)
-                if 'assignedPort' in proxy_info and 'assigned_port' not in proxy_info:
-                    proxy_info['assigned_port'] = proxy_info['assignedPort']
-                if 'proxyToken' in proxy_info and 'proxy_token' not in proxy_info:
-                    proxy_info['proxy_token'] = proxy_info['proxyToken']
+                # Parse proxy_info with Pydantic model (handles camelCase/snake_case)
+                raw_proxy_info = dict(middleware_response.proxy_info or {})
                 # Ensure dataset info is available (from build config as fallback)
-                if not proxy_info.get('dataset_id') and build_config.datasets:
-                    proxy_info['dataset_id'] = build_config.datasets[0].dataset_id
-                    proxy_info['archetype_id'] = build_config.datasets[0].archetype_id
+                if not raw_proxy_info.get('dataset_id') and not raw_proxy_info.get('datasetId') and build_config.datasets:
+                    raw_proxy_info['dataset_id'] = build_config.datasets[0].dataset_id
+                    raw_proxy_info['archetype_id'] = build_config.datasets[0].archetype_id
+                proxy_info = ProxyInfo(**raw_proxy_info)
+                # Validate SQL query before sending to proxy
+                if proxy_info.sql_query:
+                    _validate_sql_query(proxy_info.sql_query)
                 proxy_response = self._step_fetch_from_proxy(
                     job_id, request, public_key, proxy_info
                 )
@@ -114,6 +152,8 @@ class SecureExecutor(IExecutor):
                     job_id, session_id, encrypted_zip, proxy_response.encrypted_csv
                 )
             elif middleware_response and middleware_response.is_direct_db:
+                # Validate SQL query before sending to enclave
+                _validate_sql_query(middleware_response.sql_query)
                 success, output, attestation, enclave_timing = self._step_execute_in_enclave_db_fetch(
                     job_id, session_id, encrypted_zip,
                     middleware_response.encrypted_credentials,
@@ -175,7 +215,7 @@ class SecureExecutor(IExecutor):
 
     def _step_fetch_from_middleware(
         self, job_id: str, request: JobExecutionRequest,
-        build_config: BuildConfig, public_key: str, mode: str = "legacy"
+        build_config: BuildConfig, public_key: str, mode: str = MiddlewareModes.LEGACY
     ) -> Optional[MiddlewareResponse]:
         """Step 3: Fetch from middleware (mode-dependent).
 
@@ -218,7 +258,7 @@ class SecureExecutor(IExecutor):
                     raise BuildValidationError("Middleware returned proxy mode but no proxy_info")
                 self._log.info(
                     job_id, "middleware",
-                    f"Proxy mode: port={response.proxy_info.get('assigned_port', response.proxy_info.get('assignedPort'))}, status={response.proxy_info.get('status')}",
+                    f"Proxy mode: port={response.proxy_info.get('assigned_port')}, status={response.proxy_info.get('status')}",
                     progress=40
                 )
             else:
@@ -240,7 +280,7 @@ class SecureExecutor(IExecutor):
 
     def _step_fetch_from_proxy(
         self, job_id: str, request: JobExecutionRequest,
-        public_key: str, proxy_info: dict
+        public_key: str, proxy_info: ProxyInfo
     ) -> ProxyResponse:
         """Step 5a (proxy): Fetch encrypted CSV through proxy tunnel.
 
@@ -253,8 +293,6 @@ class SecureExecutor(IExecutor):
             raise RuntimeError("Proxy client not configured but proxy mode requested")
 
         try:
-            import json as _json
-
             # Get attestation document with public key in user_data (JSON).
             # The proxy verifies:
             #   1. COSE_Sign1 signature → proves real Nitro enclave (AWS root cert)
@@ -266,9 +304,9 @@ class SecureExecutor(IExecutor):
             # The proxy then json.Unmarshal(payload.UserData) to extract public_key.
             attestation_doc = ""
             try:
-                user_data_json = _json.dumps({"public_key": public_key})
+                user_data_json = json.dumps({"public_key": public_key})
                 attestation_response = self._enclave_client._send_to_enclave({
-                    'operation': 'get_attestation',
+                    'operation': EnclaveOperations.GET_ATTESTATION,
                     'user_data': user_data_json
                 })
                 if attestation_response.get('attestation'):
@@ -279,28 +317,30 @@ class SecureExecutor(IExecutor):
             except Exception as e:
                 logger.warning(f"[PROXY] Could not get attestation: {e}")
 
-            # Build middleware request for proxy
-            dataset = None
-            if hasattr(request, 'datasets') and request.datasets:
-                dataset = request.datasets[0]
+            if not attestation_doc:
+                raise RuntimeError(
+                    "Attestation document is required for proxy mode but could not be obtained. "
+                    "The proxy must verify enclave identity before data is released."
+                )
 
             middleware_request = MiddlewareRequest(
-                dataset_id=proxy_info.get('dataset_id', ''),
-                archetype_id=proxy_info.get('archetype_id', ''),
+                dataset_id=proxy_info.dataset_id,
+                archetype_id=proxy_info.archetype_id,
                 public_key=public_key,
                 job_id=job_id,
                 workspace_id=request.workspace_id
             )
 
-            # Health check before query
-            if not self._proxy_client.health_check(proxy_info):
-                logger.warning(f"[PROXY] Health check failed for port {proxy_info.get('assigned_port')}, proceeding anyway")
+            # Health check before query (ProxyClient expects dict)
+            proxy_info_dict = proxy_info.model_dump()
+            if not self._proxy_client.health_check(proxy_info_dict):
+                logger.warning(f"[PROXY] Health check failed for port {proxy_info.assigned_port}, proceeding anyway")
 
             proxy_response = self._proxy_client.fetch_encrypted_csv(
                 request=middleware_request,
                 public_key=public_key,
                 attestation_doc=attestation_doc,
-                proxy_info=proxy_info
+                proxy_info=proxy_info_dict
             )
 
             self._log.info(

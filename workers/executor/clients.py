@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
 from workers.executor.exceptions import EnclaveConnectionError
 from workers.executor.settings import get_settings, ProxyConfig
+from workers.executor.constants import EnclaveOperations, MiddlewareModes
 
 logger = logging.getLogger("epsilon.executor")
 
@@ -81,7 +82,7 @@ class EnclaveClient(IEnclaveClient):
         """Get public key from enclave for encryption."""
         try:
             request = {
-                'operation': 'generate_rsa_keypair',
+                'operation': EnclaveOperations.GENERATE_KEYPAIR,
                 'job_id': job_id,
                 'key_size': RSA_KEY_SIZE_BITS
             }
@@ -121,7 +122,7 @@ class EnclaveClient(IEnclaveClient):
             logger.info(f"[ENCLAVE] Sending data to enclave, session: {session_id[:20]}...")
 
             request = {
-                'operation': 'execute_script_rsa_hybrid',
+                'operation': EnclaveOperations.EXECUTE_SCRIPT,
                 'session_id': session_id,
                 'encrypted_data': encrypted_zip
             }
@@ -178,7 +179,7 @@ class EnclaveClient(IEnclaveClient):
             logger.info(f"[ENCLAVE] Sending data for DB fetch execution, session: {session_id[:20]}...")
 
             request = {
-                'operation': 'execute_with_db_fetch',
+                'operation': EnclaveOperations.EXECUTE_DB_FETCH,
                 'session_id': session_id,
                 'encrypted_data': encrypted_zip,
                 'encrypted_credentials': encrypted_credentials,
@@ -289,7 +290,7 @@ class EnclaveClient(IEnclaveClient):
 
     def health_check(self) -> bool:
         try:
-            response = self._send_to_enclave({'operation': 'health_check'})
+            response = self._send_to_enclave({'operation': EnclaveOperations.HEALTH_CHECK})
             return response.get('success', False)
         except Exception:
             return False
@@ -425,7 +426,7 @@ class EnclaveClientLocal(IEnclaveClient):
                     member_path = (temp_path / member).resolve()
                     if not member_path.is_relative_to(temp_path.resolve()):
                         raise ValueError(f"Zip member escapes target dir: {member}")
-                zipf.extractall(temp_path)
+                    zipf.extract(member, temp_path)
 
             if csv_data:
                 csv_path = temp_path / CSV_OUTPUT_PATH
@@ -590,7 +591,7 @@ class MiddlewareClient(IMiddlewareClient):
 
         return prepared.url, prepared.body, signed_headers
 
-    def fetch_encrypted_csv(self, request: MiddlewareRequest, mode: str = "legacy") -> MiddlewareResponse:
+    def fetch_encrypted_csv(self, request: MiddlewareRequest, mode: str = MiddlewareModes.LEGACY) -> MiddlewareResponse:
         url = self._endpoint_url
         logger.info(f"[MIDDLEWARE] POST {url} (mode={mode})")
         logger.info(f"[MIDDLEWARE] Dataset: {request.dataset_id}, Archetype: {request.archetype_id}")
@@ -666,9 +667,9 @@ class MiddlewareClient(IMiddlewareClient):
                 if not data.get('success'):
                     return MiddlewareResponse(success=False, error=data.get('error', 'Unknown error'))
 
-                response_mode = data.get('mode', 'legacy')
+                response_mode = data.get('mode', MiddlewareModes.LEGACY)
 
-                if response_mode == 'direct_db':
+                if response_mode == MiddlewareModes.DIRECT_DB:
                     # Direct DB mode: encrypted credentials + SQL query
                     encrypted_credentials = data.get('encrypted_credentials', '')
                     sql_query = data.get('sql_query', '')
@@ -678,19 +679,19 @@ class MiddlewareClient(IMiddlewareClient):
                     )
                     return MiddlewareResponse(
                         success=True,
-                        mode='direct_db',
+                        mode=MiddlewareModes.DIRECT_DB,
                         encrypted_credentials=encrypted_credentials,
                         sql_query=sql_query,
                         csv_metadata=data.get('metadata', {}),
                         request_id=response.headers.get('X-Request-ID', 'http-request')
                     )
-                elif response_mode == 'proxy':
+                elif response_mode == MiddlewareModes.PROXY:
                     # Proxy mode: proxy connection info
                     proxy_info = data.get('proxy_info', {})
                     logger.info(f"[MIDDLEWARE] Proxy mode: port={proxy_info.get('assignedPort')}, status={proxy_info.get('status')}")
                     return MiddlewareResponse(
                         success=True,
-                        mode='proxy',
+                        mode=MiddlewareModes.PROXY,
                         proxy_info=proxy_info,
                         csv_metadata=data.get('metadata', {}),
                         request_id=response.headers.get('X-Request-ID', 'http-request')
@@ -701,7 +702,7 @@ class MiddlewareClient(IMiddlewareClient):
                     logger.info(f"[MIDDLEWARE] Received encrypted CSV ({len(encrypted_csv)} chars)")
                     return MiddlewareResponse(
                         success=True,
-                        mode='legacy',
+                        mode=MiddlewareModes.LEGACY,
                         encrypted_csv=encrypted_csv,
                         csv_metadata=data.get('metadata', {}),
                         request_id=response.headers.get('X-Request-ID', 'http-request')
