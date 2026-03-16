@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1](https://github.com/Epsilon-Data/coordinator/compare/v1.1.0...v1.1.1) (2026-03-16)
+
+
+### Bug Fixes
+
+* **executor:** handle proxy mode response from middleware ([6e59489](https://github.com/Epsilon-Data/coordinator/commit/6e5948913e508071c8b0ea6fc6428f5e52126bb6))
+* **executor:** handle proxy mode response from middleware ([eadd7b2](https://github.com/Epsilon-Data/coordinator/commit/eadd7b2f07dab6b06667cf2e13832f9c15f74da0))
+
 ## [1.1.0](https://github.com/Epsilon-Data/coordinator/compare/v1.0.2...v1.1.0) (2026-03-15)
 
 
