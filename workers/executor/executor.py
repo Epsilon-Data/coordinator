@@ -218,7 +218,7 @@ class SecureExecutor(IExecutor):
                     raise BuildValidationError("Middleware returned proxy mode but no proxy_info")
                 self._log.info(
                     job_id, "middleware",
-                    f"Proxy mode: port={response.proxy_info.get('assignedPort')}, status={response.proxy_info.get('status')}",
+                    f"Proxy mode: port={response.proxy_info.get('assigned_port', response.proxy_info.get('assignedPort'))}, status={response.proxy_info.get('status')}",
                     progress=40
                 )
             else:
@@ -253,26 +253,31 @@ class SecureExecutor(IExecutor):
             raise RuntimeError("Proxy client not configured but proxy mode requested")
 
         try:
-            import hashlib
-            import base64
+            import json as _json
 
-            # Get attestation document with public key hash bound to it.
-            # This lets the proxy verify:
-            #   1. The attestation is from a real Nitro enclave (AWS root cert)
-            #   2. The public key hash in user_data matches the public key we send
-            #   3. Therefore the public key was generated inside the enclave
+            # Get attestation document with public key in user_data (JSON).
+            # The proxy verifies:
+            #   1. COSE_Sign1 signature → proves real Nitro enclave (AWS root cert)
+            #   2. public_key in user_data matches the public key in the request
+            #   3. Therefore the public key was generated inside a genuine enclave
+            #
+            # user_data is sent as raw JSON string (not base64) because the enclave's
+            # _get_attestation does .encode() on strings, and NSM stores bytes as-is.
+            # The proxy then json.Unmarshal(payload.UserData) to extract public_key.
             attestation_doc = ""
             try:
-                public_key_hash = hashlib.sha256(public_key.encode()).digest()
+                user_data_json = _json.dumps({"public_key": public_key})
                 attestation_response = self._enclave_client._send_to_enclave({
                     'operation': 'get_attestation',
-                    'user_data': base64.b64encode(public_key_hash).decode()
+                    'user_data': user_data_json
                 })
                 if attestation_response.get('attestation'):
                     attestation_doc = attestation_response['attestation'].get('attestation_document', '')
-                logger.info(f"[PROXY] Attestation with public key binding generated")
+                    logger.info(f"[PROXY] Attestation with public key binding: doc_len={len(attestation_doc)}")
+                else:
+                    logger.warning(f"[PROXY] No attestation in response: {list(attestation_response.keys())}")
             except Exception as e:
-                logger.warning(f"[PROXY] Could not get attestation document: {e}")
+                logger.warning(f"[PROXY] Could not get attestation: {e}")
 
             # Build middleware request for proxy
             dataset = None
