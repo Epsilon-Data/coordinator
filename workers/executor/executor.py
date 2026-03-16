@@ -203,6 +203,14 @@ class SecureExecutor(IExecutor):
                     f"Received direct_db response (credentials={len(response.encrypted_credentials)} chars)",
                     progress=40
                 )
+            elif response.is_proxy:
+                if not response.proxy_info:
+                    raise BuildValidationError("Middleware returned proxy mode but no proxy_info")
+                self._log.info(
+                    job_id, "middleware",
+                    f"Proxy mode: port={response.proxy_info.get('assignedPort')}, status={response.proxy_info.get('status')}",
+                    progress=40
+                )
             else:
                 if not response.encrypted_csv:
                     raise BuildValidationError("Middleware returned empty CSV")
