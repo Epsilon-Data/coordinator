@@ -86,6 +86,7 @@ class MiddlewareConfig:
 class ProxyConfig:
     """Proxy tunnel configuration for data owner connections."""
     enabled: bool = field(default_factory=lambda: os.getenv('PROXY_ENABLED', 'true').lower() == 'true')
+    rathole_host: str = field(default_factory=lambda: os.getenv('RATHOLE_HOST', 'localhost'))
     request_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('PROXY_REQUEST_TIMEOUT', '120')))
 
 

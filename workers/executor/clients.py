@@ -780,7 +780,8 @@ class ProxyClient:
     def __init__(self, settings: ProxyConfig):
         self._settings = settings
         self._timeout = settings.request_timeout_seconds
-        logger.info(f"[PROXY] Initialized (enabled={settings.enabled}, timeout={self._timeout}s)")
+        self._rathole_host = settings.rathole_host
+        logger.info(f"[PROXY] Initialized (enabled={settings.enabled}, host={self._rathole_host}, timeout={self._timeout}s)")
 
     def fetch_encrypted_csv(
         self,
@@ -805,10 +806,17 @@ class ProxyClient:
         session_id = proxy_info.get('session_id', '')
         sql_query = proxy_info.get('sql_query', '')
 
+        logger.info(f"[PROXY] proxy_info keys: {list(proxy_info.keys())}")
+        logger.info(f"[PROXY] assigned_port={assigned_port}, has_token={bool(proxy_token)}, "
+                     f"has_sql={bool(sql_query)}, sql_len={len(sql_query)}")
+
+        if not sql_query:
+            logger.warning("[PROXY] No SQL query in proxy_info — middleware may not have returned it")
+
         timestamp = str(int(time.time()))
         request_id = f"coord-{request.job_id}-{timestamp}"
 
-        url = f"http://localhost:{assigned_port}/query"
+        url = f"http://{self._rathole_host}:{assigned_port}/query"
 
         payload = {
             'request_id': request_id,
@@ -833,7 +841,7 @@ class ProxyClient:
             'X-Request-ID': request_id
         }
 
-        logger.info(f"[PROXY] POST {url} (request_id={request_id})")
+        logger.info(f"[PROXY] POST {url} (request_id={request_id}, dataset={request.dataset_id})")
 
         try:
             response = requests.post(
@@ -843,24 +851,29 @@ class ProxyClient:
                 timeout=self._timeout
             )
 
+            logger.info(f"[PROXY] Response: HTTP {response.status_code}, body_len={len(response.content)}")
+
             if response.status_code >= HTTP_ERROR_THRESHOLD:
                 error_msg = f"Proxy returned HTTP {response.status_code}"
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('error', error_msg)
+                    logger.error(f"[PROXY] Error response: {error_data}")
                 except Exception:
-                    pass
+                    logger.error(f"[PROXY] Raw error response: {response.text[:500]}")
                 raise RuntimeError(f"[PROXY] Query failed: {error_msg}")
 
             data = response.json()
 
             if not data.get('success', False):
+                logger.error(f"[PROXY] Query not successful: {data}")
                 raise RuntimeError(f"[PROXY] Query failed: {data.get('error', 'Unknown error')}")
 
             encrypted_csv = data.get('encrypted_csv', '')
             metadata = data.get('metadata', {})
 
-            logger.info(f"[PROXY] Received encrypted CSV ({len(encrypted_csv)} chars)")
+            logger.info(f"[PROXY] Success! Encrypted CSV: {len(encrypted_csv)} chars, "
+                        f"metadata: {metadata}")
 
             return ProxyResponse(
                 encrypted_csv=encrypted_csv,
@@ -868,9 +881,11 @@ class ProxyClient:
             )
 
         except requests.exceptions.Timeout:
+            logger.error(f"[PROXY] Timeout after {self._timeout}s connecting to {url}")
             raise RuntimeError(f"[PROXY] Request timeout after {self._timeout}s")
         except requests.exceptions.ConnectionError as e:
-            raise RuntimeError(f"[PROXY] Cannot connect to proxy at port {assigned_port}: {e}")
+            logger.error(f"[PROXY] Connection failed to {url}: {e}")
+            raise RuntimeError(f"[PROXY] Cannot connect to proxy at {self._rathole_host}:{assigned_port}: {e}")
 
     def health_check(self, proxy_info: dict) -> bool:
         """Check if the proxy tunnel is healthy.
@@ -882,9 +897,10 @@ class ProxyClient:
             True if healthy, False otherwise.
         """
         assigned_port = proxy_info['assigned_port']
-        url = f"http://localhost:{assigned_port}/health"
+        url = f"http://{self._rathole_host}:{assigned_port}/health"
 
         try:
+            logger.info(f"[PROXY] Health check: GET {url}")
             response = requests.get(url, timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
             return response.status_code == 200
         except Exception as e:
