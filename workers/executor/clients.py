@@ -371,8 +371,9 @@ class EnclaveClientLocal(IEnclaveClient):
             output = self._execute_script(decrypted_zip, decrypted_csv)
             logger.info("[ENCLAVE] Execution completed successfully")
 
-            # Local mode doesn't have attestation
-            return True, output, None
+            # Generate local attestation document for dev/testing
+            attestation = self._generate_local_attestation(session_id, output, decrypted_zip, decrypted_csv)
+            return True, output, attestation
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Execution failed: {e}", exc_info=True)
@@ -380,6 +381,57 @@ class EnclaveClientLocal(IEnclaveClient):
 
         finally:
             self._sessions.pop(session_id, None)
+
+    def _generate_local_attestation(
+        self,
+        session_id: str,
+        output: str,
+        decrypted_zip: Optional[bytes] = None,
+        decrypted_csv: Optional[bytes] = None
+    ) -> Optional[Dict]:
+        """Generate a local attestation document after successful execution."""
+        try:
+            import hashlib
+            import json
+            import time as _time
+
+            # Build user_data hash bundle (same structure as real enclave)
+            script_hash = hashlib.sha256(decrypted_zip).hexdigest() if decrypted_zip else ""
+            dataset_hash = hashlib.sha256(decrypted_csv).hexdigest() if decrypted_csv else ""
+            output_hash = hashlib.sha256(output.encode()).hexdigest()
+
+            user_data = json.dumps({
+                "job_id": session_id.replace("local_session_", ""),
+                "script_hash": script_hash,
+                "dataset_hash": dataset_hash,
+                "output_hash": output_hash,
+                "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                "nonce": hashlib.sha256(session_id.encode()).hexdigest()[:32],
+            }).encode()
+
+            from implementations.local_attestation_service import generate_local_attestation
+
+            ok, result = generate_local_attestation(
+                user_data=user_data,
+                nonce=session_id.encode()[:64],
+            )
+
+            if ok:
+                logger.info(f"[ATTESTATION-LOCAL] Generated local attestation: {len(result.get('document', ''))} chars")
+                return {
+                    "attestation": {
+                        "attestation_document": result["document"],
+                        "module_id": result.get("module_id", "local"),
+                        "is_local": True,
+                    }
+                }
+            else:
+                logger.warning(f"[ATTESTATION-LOCAL] Generation failed: {result}")
+                return None
+
+        except Exception as e:
+            logger.warning(f"[ATTESTATION-LOCAL] Could not generate: {e}")
+            return None
 
     def send_encrypted_data_with_db_fetch(
         self,
