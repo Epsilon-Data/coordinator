@@ -35,12 +35,12 @@ executor = [
 
 # AI Agent worker
 ai-agent = [
-    "crewai",
-    "crewai-tools",
-    "langchain",
-    "langchain-community",
-    "langchain-openai",
-    "openai",
+    "crewai==1.11.0",
+    "crewai-tools==1.11.0",
+    "langchain==1.2.12",
+    "langchain-community==0.4.1",
+    "langchain-openai==1.1.11",
+    "openai==2.29.0",
     "pydantic>=2.4.0",
     "pyyaml>=6.0",
     "requests>=2.31.0",

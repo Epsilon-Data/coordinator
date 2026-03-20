@@ -5,9 +5,9 @@ from typing import List, Dict, Any, Optional
 class CodeViolation(BaseModel):
     """Individual code policy violation"""
     file: str
-    line: int
+    line: int = 0
     field: str
-    code: str
+    code: str = ""
     type: str  # 'attribute_access', 'dictionary_access', 'print_statement'
 
 

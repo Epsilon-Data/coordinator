@@ -40,6 +40,7 @@ services:
       SHARED_STORAGE_PATH: /shared/epsilon
       POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AI_AGENT_ENABLED: "true"
     volumes:
       - shared_storage:/shared/epsilon
     networks:
@@ -103,34 +104,36 @@ services:
         max-file: "5"
 
   # ---------------------------------------------------------------------------
-  # AI Agent Worker (Optional) - AI validation (cloned → ai_approved/ai_rejected)
-  # Uncomment to enable AI validation step
+  # AI Agent Worker - AI validation (cloned → ai_approved/ai_rejected)
   # ---------------------------------------------------------------------------
-  # ai-agent-worker:
-  #   image: ${DOCKER_REGISTRY:-ghcr.io/Epsilon-Data}/epsilon-coordinator:${VERSION:-latest}
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   environment:
-  #     WORKER_MODE: ai
-  #     DATABASE_URL: ${DATABASE_URL}
-  #     SHARED_STORAGE_PATH: /shared/epsilon
-  #     OPENAI_API_KEY: ${OPENAI_API_KEY}
-  #     POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
-  #     LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  #   volumes:
-  #     - shared_storage:/shared/epsilon
-  #   networks:
-  #     - epsilon-network
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - clone-worker
-  #   deploy:
-  #     replicas: 1
-  #     resources:
-  #       limits:
-  #         memory: 2G
-  #         cpus: '1'
+  ai-agent-worker:
+    image: ghcr.io/epsilon-data/coordinator:${VERSION:-latest}
+    environment:
+      WORKER_MODE: ai
+      DATABASE_URL: ${DATABASE_URL}
+      SHARED_STORAGE_PATH: /shared/epsilon
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CREWAI_LLM_MODEL: ${CREWAI_LLM_MODEL:-gpt-4o-mini}
+      POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - shared_storage:/shared/epsilon
+    networks:
+      - epsilon-network
+    restart: unless-stopped
+    depends_on:
+      - clone-worker
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 # =============================================================================
 # Volumes

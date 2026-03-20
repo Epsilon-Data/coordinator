@@ -13,9 +13,14 @@ RUN git config --global init.templateDir ''
 
 WORKDIR /app
 
-# Install epsilon-attestation-verifier from local source
-COPY epsilon-attestation-verifier/ /tmp/epsilon-attestation-verifier/
-RUN pip install --no-cache-dir /tmp/epsilon-attestation-verifier/ && rm -rf /tmp/epsilon-attestation-verifier/
+# Install epsilon-attestation-verifier from GitHub
+ARG GITHUB_TOKEN=""
+ARG VERIFIER_REF=main
+RUN if [ -n "$GITHUB_TOKEN" ]; then \
+      pip install --no-cache-dir "git+https://${GITHUB_TOKEN}@github.com/Epsilon-Data/epsilon-attestation-verifier.git@${VERIFIER_REF}"; \
+    else \
+      pip install --no-cache-dir "git+https://github.com/Epsilon-Data/epsilon-attestation-verifier.git@${VERIFIER_REF}"; \
+    fi
 
 # Copy package definition first for better layer caching
 COPY pyproject.toml .
@@ -23,10 +28,15 @@ COPY pyproject.toml .
 # Copy source code
 COPY shared ./shared/
 COPY workers ./workers/
+COPY implementations ./implementations/
 COPY entrypoint.py .
 
+# Copy Alembic migration files
+COPY alembic.ini .
+COPY migrations ./migrations/
+
 # Install all dependencies (single image for all workers)
-RUN pip install --no-cache-dir -e .[all]
+RUN pip install --no-cache-dir -e .[all-with-ai]
 
 # Create necessary directories and non-root user
 RUN mkdir -p /app/logs /app/artifacts /app/repositories /shared/epsilon \

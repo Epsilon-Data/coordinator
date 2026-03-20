@@ -277,7 +277,7 @@ class ExecutorWorkerBase(BaseWorker):
     """Base class specifically for execution workers."""
 
     def fetch_jobs(self) -> List[Dict[str, Any]]:
-        """Fetch AI approved jobs for execution."""
-        return job_repository.fetch_ai_approved_jobs(self.batch_size)
+        """Fetch cloned jobs for execution."""
+        return job_repository.fetch_cloned_jobs_for_execution(self.batch_size)
 
 

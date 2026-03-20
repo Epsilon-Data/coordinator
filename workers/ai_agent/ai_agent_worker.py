@@ -76,73 +76,75 @@ class AIAgentWorker(AIWorkerBase):
             self.job_logger.info(
                 job_id, "ai_analysis",
                 f"Starting AI security analysis",
-                metadata={"repo_path": str(repo_path), "workspace_id": workspace_id}
+                metadata={"repo_path": str(repo_path), "workspace_id": workspace_id},
+                progress=0
             )
 
-            # Run analysis
-            self.job_logger.info(job_id, "ai_analysis", "Running AI agents", progress=30)
+            # Step 1: Code scanning
+            self.job_logger.info(job_id, "ai_scanning", "Scanning code with AST analyzer", progress=15)
+
+            # Step 2: Run AI agents
+            self.job_logger.info(job_id, "ai_agents", "Running CrewAI security agents (Policy Specialist → Code Analyzer → Decision Maker)", progress=30)
 
             decision = analyze_repository(repo_path=str(repo_path), job_id=job_id)
+
+            # Step 3: Analysis complete
+            self.job_logger.info(
+                job_id, "ai_complete",
+                f"AI analysis completed: {'APPROVED' if decision.approved else 'FLAGGED'} (confidence: {decision.confidence_score})",
+                progress=90
+            )
 
             logger.info(f"Analysis completed: {'APPROVED' if decision.approved else 'REJECTED'}")
 
             # Save results
             result_path = self._save_analysis_result(job_id, decision)
 
-            if decision.approved:
-                self.job_logger.info(
-                    job_id, "ai_approved",
-                    f"Repository approved (confidence: {decision.confidence_score})",
-                    metadata={
-                        "confidence_score": decision.confidence_score,
-                        "reasoning": decision.reasoning,
-                        "result_path": str(result_path)
-                    },
-                    progress=100
-                )
+            # AI analysis is independent — writes results as metadata
+            # without changing the job status (executor picks up 'cloned' directly)
+            ai_status = 'ai_approved' if decision.approved else 'ai_rejected'
 
-                job_repository.update_job_status(
-                    job_id=job_id,
-                    status='ai_approved',
-                    ai_confidence_score=decision.confidence_score,
-                    ai_reasoning=decision.reasoning,
-                    ai_result_path=str(result_path)
-                )
-                logger.info(f"Job {job_id} approved")
+            self.job_logger.info(
+                job_id, ai_status,
+                f"Repository {'approved' if decision.approved else 'rejected'} (confidence: {decision.confidence_score})",
+                metadata={
+                    "confidence_score": decision.confidence_score,
+                    "reasoning": decision.reasoning,
+                    "risks_identified": decision.risks_identified if not decision.approved else [],
+                    "result_path": str(result_path)
+                },
+                progress=100
+            )
 
-            else:
-                self.job_logger.info(
-                    job_id, "ai_rejected",
-                    f"Repository rejected: {decision.reasoning}",
-                    metadata={
-                        "confidence_score": decision.confidence_score,
-                        "reasoning": decision.reasoning,
-                        "risks_identified": decision.risks_identified,
-                        "pii_details": [v.model_dump() for v in decision.pii_details] if decision.pii_details else [],
-                        "result_path": str(result_path)
-                    },
-                    progress=100
-                )
-
-                job_repository.update_job_status(
-                    job_id=job_id,
-                    status='ai_rejected',
-                    ai_confidence_score=decision.confidence_score,
-                    ai_reasoning=decision.reasoning,
-                    ai_risks=decision.risks_identified,
-                    ai_result_path=str(result_path)
-                )
-                logger.info(f"Job {job_id} rejected: {decision.reasoning}")
+            # Store AI results as metadata only — do NOT change job status
+            job_repository.update_job_ai_results(
+                job_id=job_id,
+                ai_confidence_score=decision.confidence_score,
+                ai_reasoning=decision.reasoning,
+                ai_risks=decision.risks_identified if not decision.approved else None,
+                ai_result_path=str(result_path),
+                ai_decision=ai_status
+            )
+            logger.info(f"Job {job_id} AI analysis: {ai_status} (independent, status unchanged)")
 
         except Exception as e:
-            logger.error(f"AI analysis for job {job_id} failed: {e}")
+            logger.error(f"AI analysis for job {job_id} failed: {e}", exc_info=True)
             self.job_logger.error(
-                job_id, "ai_analysis",
+                job_id, "ai_error",
                 f"AI analysis failed: {e}",
                 error=e,
-                metadata={"repo_path": str(repo_path)}
+                metadata={"repo_path": str(repo_path), "error_type": type(e).__name__}
             )
-            self._update_job_failed(job_id, str(e))
+            # Store error as AI result (informational, doesn't change job status)
+            try:
+                job_repository.update_job_ai_results(
+                    job_id=job_id,
+                    ai_confidence_score=0.0,
+                    ai_reasoning=f"AI analysis error: {e}",
+                    ai_decision="ai_error"
+                )
+            except Exception as store_err:
+                logger.error(f"Failed to store AI error for {job_id}: {store_err}")
 
     def process_job(self, job: Dict[str, Any]) -> bool:
         """Process a single AI analysis job."""
