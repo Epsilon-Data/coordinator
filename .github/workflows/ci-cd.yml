@@ -31,7 +31,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -e ".[dev,executor]"
+        run: pip install -e ".[dev,executor,ai-agent]"
 
       - name: Run tests
         env:
