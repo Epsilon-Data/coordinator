@@ -256,11 +256,11 @@ class TestExecutorWorkerBase:
 
             yield TestExecutorWorker('TestExecutorWorker'), mock
 
-    def test_fetch_jobs_calls_ai_approved(self, executor_worker):
-        """Test fetch_jobs calls fetch_ai_approved_jobs."""
+    def test_fetch_jobs_calls_cloned_for_execution(self, executor_worker):
+        """Test fetch_jobs calls fetch_cloned_jobs_for_execution."""
         worker, mock_repo = executor_worker
         worker.fetch_jobs()
-        mock_repo.fetch_ai_approved_jobs.assert_called_once_with(worker.batch_size)
+        mock_repo.fetch_cloned_jobs_for_execution.assert_called_once_with(worker.batch_size)
 
     def test_executor_logger_name(self, executor_worker):
         """Test ExecutorWorkerBase uses correct logger name."""
