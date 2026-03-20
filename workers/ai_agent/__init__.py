@@ -17,7 +17,7 @@ from workers.ai_agent.tasks import (
     create_analyzer_task,
     create_decision_task,
 )
-from workers.ai_agent.tools import CodeExecutorTool, PolicyLoaderTool
+from workers.ai_agent.tools import CodeExecutorTool, PolicyLoaderTool, ASTSecurityScanner, OutputDisclosureTool
 from workers.ai_agent.schemas import (
     AnalysisDecision,
     CodeViolation,
@@ -37,6 +37,8 @@ __all__ = [
     # Tools
     'CodeExecutorTool',
     'PolicyLoaderTool',
+    'ASTSecurityScanner',
+    'OutputDisclosureTool',
     # Schemas
     'AnalysisDecision',
     'CodeViolation',

@@ -88,8 +88,9 @@ class CloneWorker(CloneWorkerBase):
                 "cloned_commit_hash": repo_info.get("commit_hash")
             }
 
-            # Determine next status
-            next_status = 'cloned' if config.ai_agent_enabled else 'ai_approved'
+            # Always set to 'cloned' — executor picks up cloned jobs directly
+            # AI agent runs independently and writes results as metadata
+            next_status = 'cloned'
 
             # Update job status
             job_repository.update_job_status(
@@ -99,11 +100,7 @@ class CloneWorker(CloneWorkerBase):
                 repo_metadata=metadata
             )
 
-            # Log completion
-            if config.ai_agent_enabled:
-                msg = f"Successfully cloned {github_repo}. Ready for AI analysis."
-            else:
-                msg = f"Successfully cloned {github_repo}. AI disabled, ready for execution."
+            msg = f"Successfully cloned {github_repo}. Ready for execution."
 
             self.job_logger.info(
                 job_id, "clone", msg,

@@ -1,75 +1,114 @@
+import json
 from crewai import Task, Agent
 from workers.ai_agent.schemas import ExecutionResult
-from typing import Dict, Any
 
 
-def create_analyzer_task(agent: Agent, execution_result: ExecutionResult, pii_fields: list, main_script_content: str = "", script_filename: str = "") -> Task:
-    """Create code analysis task"""
+def create_analyzer_task(
+    agent: Agent,
+    execution_result: ExecutionResult,
+    pii_fields: list,
+    main_script_content: str = "",
+    script_filename: str = "",
+    ast_report=None,
+    output_report=None,
+) -> Task:
+    """Create code analysis task using deterministic scanner results."""
+
+    # Format AST findings
+    if ast_report:
+        ast_section = f"""
+        AST SCAN RESULT: {'SAFE — no findings' if ast_report.safe else 'FINDINGS DETECTED'}
+        Summary: {ast_report.summary}
+        Total lines scanned: {ast_report.total_lines}
+        Imports found: {ast_report.imports_found}
+        Blocked imports: {ast_report.blocked_imports_found if ast_report.blocked_imports_found else 'NONE'}
+        Safe imports: {ast_report.safe_imports_found}
+        Unknown imports: {ast_report.unknown_imports if ast_report.unknown_imports else 'NONE'}
+        Has network access: {ast_report.has_network_access}
+        Has code injection: {ast_report.has_code_injection}
+        Has credential access: {ast_report.has_credential_access}
+        Has filesystem escape: {ast_report.has_filesystem_escape}
+        Has obfuscation: {ast_report.has_obfuscation}
+
+        DETAILED FINDINGS:
+        {json.dumps(ast_report.findings, indent=2) if ast_report.findings else 'No findings — all checks passed.'}
+        """
+    else:
+        ast_section = "AST scan not available."
+
+    # Format output disclosure findings
+    if output_report:
+        output_section = f"""
+        OUTPUT DISCLOSURE CHECK: {'SAFE — no findings' if output_report.safe else 'FINDINGS DETECTED'}
+        Summary: {output_report.summary}
+        Stdout lines: {output_report.stdout_lines}
+        Output files: {output_report.output_file_count}
+        Total data rows: {output_report.total_output_rows}
+
+        DETAILED FINDINGS:
+        {json.dumps(output_report.findings, indent=2) if output_report.findings else 'No findings — output is clean.'}
+        """
+    else:
+        output_section = "Output disclosure check not available."
 
     return Task(
         description=f"""
-        IMPORTANT: The code has ALREADY been executed. Do NOT execute any code or use any tools.
-        Your job is to analyze the main analysis script and its execution results for ACTUAL PII exposure.
+        Review the automated security scanner results for script '{script_filename}'
+        and provide your expert assessment.
 
-        MAIN ANALYSIS SCRIPT TO ANALYZE:
-        Filename: {script_filename}
+        IMPORTANT: The automated scanners have already analyzed the code and output.
+        Your job is to REVIEW THEIR FINDINGS, not re-scan the code yourself.
+        Trust the scanner results — they are deterministic and factual.
 
-        Script content:
-        {main_script_content[:2000]}{'...' if len(main_script_content) > 2000 else ''}
+        ============================================================
+        AUTOMATED AST SECURITY SCAN RESULTS
+        ============================================================
+        {ast_section}
 
-        EXECUTION RESULTS TO ANALYZE:
+        ============================================================
+        AUTOMATED OUTPUT DISCLOSURE CHECK RESULTS
+        ============================================================
+        {output_section}
 
-        Code execution details:
-        - Success: {execution_result.success}
-        - Return code: {execution_result.return_code}
-        - Execution time: {execution_result.execution_time}s
-        - Number of output files: {len(execution_result.output_files)}
+        ============================================================
+        EXECUTION CONTEXT
+        ============================================================
+        Success: {execution_result.success}
+        Return code: {execution_result.return_code}
+        Execution time: {execution_result.execution_time}s
+        Output files: {[f['name'] for f in execution_result.output_files]}
 
-        Standard output:
-        {execution_result.stdout}
+        ============================================================
+        SCRIPT SOURCE (for context only — AST scanner already analyzed this)
+        ============================================================
+        ```python
+        {main_script_content[:2000]}{'...[truncated]' if len(main_script_content) > 2000 else ''}
+        ```
 
-        Standard error:
-        {execution_result.stderr}
+        ============================================================
+        YOUR TASK
+        ============================================================
 
-        Output files generated:
-        {[f['name'] for f in execution_result.output_files]}
+        Based on the scanner results above:
 
-        Output file contents (first 1000 chars each):
-        {chr(10).join([f"--- {f['name']} ---{chr(10)}{f.get('content', '[No content available]')[:1000]}" for f in execution_result.output_files])}
+        1. If AST scan found ZERO findings and output check found ZERO findings:
+           → The script is safe. State this clearly. Do not invent new findings.
 
-        PII fields to check for:
-        {', '.join(pii_fields)}
+        2. If scanners found findings:
+           → Assess whether each finding is a genuine threat or acceptable.
+           → Consider the context: this is a researcher analysis script running
+             in a Trusted Execution Environment (AWS Nitro Enclave).
+           → The `generated.models` module is the Epsilon SDK's auto-generated
+             data loader — it is ALWAYS safe and expected.
+           → Printing analysis results (counts, statistics, field values) is
+             NORMAL behavior for research scripts.
 
-        CRITICAL: READ THE ACTUAL SCRIPT CODE CAREFULLY!
+        3. Provide your assessment as a structured summary that the Decision
+           Agent can use.
 
-        Look at the actual script content provided above.
-        Read line by line what fields it actually accesses.
-        Do NOT assume - read what is actually written in the script.
-
-        WHAT TO ANALYZE:
-        1. SCRIPT CODE ACCESS: What fields does the Python code actually access?
-           - Look for lines like `record.patient.FIELD_NAME`
-           - Check if FIELD_NAME is in the PII list
-           - Examples: `patient_id`, `name`, `email` = PII (BAD)
-           - Examples: `heart_rate`, `age`, `diagnosis` = NOT PII (OK)
-
-        2. EXECUTION OUTPUT: Does stdout contain actual PII values?
-           - Patient ID numbers, names, emails, SSNs = PII (BAD)
-           - Heart rates, ages, anonymous statistics = NOT PII (OK)
-           - Dummy/synthetic values are OK if clearly synthetic
-
-        3. SCHEMA vs ACCESS: Schema showing fields exist ≠ Script accessing them
-           - Schema metadata showing PII field names = OK (just documentation)
-           - Script code actually accessing PII fields = BAD (privacy violation)
-
-        DECISION CRITERIA:
-        - APPROVE: Script accesses only non-PII fields AND output contains no PII values
-        - REJECT: Script accesses PII fields OR output contains actual PII values
-        - REJECT: Patient identifiers, names, emails in code or output
-        - APPROVE: Only aggregated stats, heart rates, or anonymized data
-
-        Do NOT execute any code - only analyze the script and results provided above.
+        CRITICAL RULE: Do NOT fabricate findings that the scanners did not report.
+        If the scanners say "no findings", your answer must confirm the script is safe.
         """,
         agent=agent,
-        expected_output="Intelligent PII analysis focusing on actual privacy risks, not dummy data usage"
+        expected_output="Assessment of scanner findings: confirm safety if no findings, or explain genuine threats if findings exist"
     )

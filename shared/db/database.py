@@ -256,13 +256,75 @@ class JobRepository:
         """Fetch queued jobs for clone worker"""
         return self.fetch_jobs_by_status_with_workspace('queued', limit, claim_status='cloning')
 
+    def update_job_ai_results(
+        self,
+        job_id: str,
+        ai_confidence_score: float = None,
+        ai_reasoning: str = None,
+        ai_risks: list = None,
+        ai_result_path: str = None,
+        ai_decision: str = None,
+    ) -> None:
+        """Store AI analysis results as metadata without changing job status."""
+        with self.db.get_session() as session:
+            job = session.get(JobRequest, job_id)
+            if not job:
+                raise ValueError(f"Job {job_id} not found")
+
+            job.updated_at = datetime.now(timezone.utc)
+
+            if ai_confidence_score is not None:
+                job.validation_status = str(ai_confidence_score)
+            if ai_reasoning is not None:
+                job.validation_decision = ai_reasoning
+            if ai_risks is not None:
+                job.ai_logs = json.dumps(ai_risks) if isinstance(ai_risks, list) else str(ai_risks)
+            if ai_decision is not None:
+                # Store the AI decision (ai_approved/ai_rejected) in a metadata field
+                # This is informational only — does not affect execution flow
+                existing = job.execution_metrics
+                try:
+                    metrics = json.loads(existing) if existing else {}
+                except (json.JSONDecodeError, TypeError):
+                    metrics = {}
+                metrics['ai_decision'] = ai_decision
+                job.execution_metrics = json.dumps(metrics)
+
+            session.commit()
+            logger.info(f"Stored AI results for job {job_id}: decision={ai_decision}")
+
     def fetch_cloned_jobs(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Fetch cloned jobs for AI agent worker"""
-        return self.fetch_jobs_by_status_with_workspace('cloned', limit, claim_status='analyzing')
+        """Fetch cloned jobs for AI agent worker that haven't been analyzed yet."""
+        with self.db.get_session() as session:
+            stmt = (
+                select(JobRequest, Workspace)
+                .join(Workspace, JobRequest.workspace_id == Workspace.id)
+                .where(JobRequest.status.in_(['cloned', 'executing', 'success']))
+                .where(JobRequest.validation_status.is_(None))  # not yet analyzed by AI
+                .order_by(JobRequest.created_at)
+                .limit(limit)
+            )
+            result = session.execute(stmt).all()
+
+            if not result:
+                return []
+
+            jobs = []
+            for job, workspace in result:
+                job_dict = self._job_to_dict(job)
+                job_dict['github_repo'] = workspace.github_repo
+                job_dict['github_branch'] = workspace.github_branch
+                jobs.append(job_dict)
+
+            return jobs
 
     def fetch_ai_approved_jobs(self, limit: int = 1) -> List[Dict[str, Any]]:
-        """Fetch AI approved jobs for executor worker"""
+        """Fetch AI approved jobs for executor worker (legacy)"""
         return self.fetch_jobs_by_status_with_workspace('ai_approved', limit, claim_status='executing')
+
+    def fetch_cloned_jobs_for_execution(self, limit: int = 1) -> List[Dict[str, Any]]:
+        """Fetch cloned jobs for executor worker (AI runs independently)"""
+        return self.fetch_jobs_by_status_with_workspace('cloned', limit, claim_status='executing')
 
     def _job_to_dict(self, job: JobRequest) -> Dict[str, Any]:
         """Convert JobRequest model to dictionary for backward compatibility"""

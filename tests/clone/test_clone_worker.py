@@ -165,8 +165,8 @@ class TestCloneWorker:
 
         assert final_status == 'cloned'
 
-    def test_process_job_sets_ai_approved_status_ai_disabled(self, clone_worker, sample_job, mock_job_repository, mock_config):
-        """Test that status is 'ai_approved' when AI agent is disabled."""
+    def test_process_job_sets_cloned_status_ai_disabled(self, clone_worker, sample_job, mock_job_repository, mock_config):
+        """Test that status is 'cloned' even when AI agent is disabled (executor picks up cloned directly)."""
         mock_config.ai_agent_enabled = False
 
         clone_worker.process_job(sample_job)
@@ -177,7 +177,7 @@ class TestCloneWorker:
             if 'status' in call[1]:
                 final_status = call[1]['status']
 
-        assert final_status == 'ai_approved'
+        assert final_status == 'cloned'
 
     def test_health_check(self, clone_worker, mock_storage_manager):
         """Test worker health check."""
