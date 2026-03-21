@@ -13,14 +13,8 @@ RUN git config --global init.templateDir ''
 
 WORKDIR /app
 
-# Install epsilon-attestation-verifier from GitHub
-ARG GITHUB_TOKEN=""
-ARG VERIFIER_REF=main
-RUN if [ -n "$GITHUB_TOKEN" ]; then \
-      pip install --no-cache-dir "git+https://${GITHUB_TOKEN}@github.com/Epsilon-Data/epsilon-attestation-verifier.git@${VERIFIER_REF}"; \
-    else \
-      pip install --no-cache-dir "git+https://github.com/Epsilon-Data/epsilon-attestation-verifier.git@${VERIFIER_REF}"; \
-    fi
+# Install epsilon-attestation-verifier from PyPI
+RUN pip install --no-cache-dir epsilon-attestation-verifier
 
 # Copy package definition first for better layer caching
 COPY pyproject.toml .
