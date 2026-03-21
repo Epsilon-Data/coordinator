@@ -28,7 +28,6 @@ COPY pyproject.toml .
 # Copy source code
 COPY shared ./shared/
 COPY workers ./workers/
-COPY implementations ./implementations/
 COPY entrypoint.py .
 
 # Copy Alembic migration files

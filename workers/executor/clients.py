@@ -402,7 +402,7 @@ class EnclaveClientLocal(IEnclaveClient):
                 "nonce": hashlib.sha256(session_id.encode()).hexdigest()[:32],
             }).encode()
 
-            from implementations.local_attestation_service import generate_local_attestation  # noqa: E402 — lazy: cbor2 only in Docker
+            from workers.executor.local_attestation import generate_local_attestation  # noqa: E402 — lazy: cbor2 only in Docker
 
             ok, result = generate_local_attestation(
                 user_data=user_data,
