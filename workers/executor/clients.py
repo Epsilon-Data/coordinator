@@ -23,6 +23,7 @@ from botocore.awsrequest import AWSRequest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
 from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
+from workers.executor.services import CryptoService
 from workers.executor.exceptions import EnclaveConnectionError
 from workers.executor.settings import get_settings, ProxyConfig
 from workers.executor.constants import EnclaveOperations, MiddlewareModes
@@ -69,8 +70,6 @@ class EnclaveClient(IEnclaveClient):
     """Production client for communicating with Nitro Enclave via VSock."""
 
     def __init__(self, enclave_cid: int = None):
-        from workers.executor.services import CryptoService
-
         self._settings = get_settings()
         self._crypto = CryptoService()
         # Use provided CID, or external CID from settings, or auto-detect
@@ -320,8 +319,6 @@ class EnclaveClientLocal(IEnclaveClient):
     """Local enclave client for development and testing."""
 
     def __init__(self, enclave_cid: Optional[int] = None):
-        from workers.executor.services import CryptoService
-
         self._settings = get_settings()
         self._crypto = CryptoService()
         self._sessions: Dict[str, RSAPrivateKey] = {}
@@ -405,7 +402,7 @@ class EnclaveClientLocal(IEnclaveClient):
                 "nonce": hashlib.sha256(session_id.encode()).hexdigest()[:32],
             }).encode()
 
-            from implementations.local_attestation_service import generate_local_attestation
+            from implementations.local_attestation_service import generate_local_attestation  # noqa: E402 — lazy: cbor2 only in Docker
 
             ok, result = generate_local_attestation(
                 user_data=user_data,

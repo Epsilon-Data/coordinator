@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 
 from sqlalchemy import text
 
-from shared.db import job_repository
+from shared.db import db, job_repository
 from shared.base_worker import ExecutorWorkerBase
 from workers.executor.utils import get_logger, setup_logging
 from workers.executor.interfaces import IExecutor
@@ -56,7 +56,6 @@ class ExecutorWorker(ExecutorWorkerBase):
     def _stamp_boot_ready(self) -> None:
         """Update the most recent boot_events row with boot_ready_at timestamp."""
         try:
-            from shared.db import db
             with db.get_session() as session:
                 session.execute(
                     text(
@@ -97,7 +96,7 @@ class ExecutorWorker(ExecutorWorkerBase):
     def _verify_attestation(self, job_id: str, attestation: Any, logger) -> Optional[str]:
         """Verify attestation document and return a JSON verification receipt."""
         try:
-            from epsilon_verifier import verify_attestation
+            from epsilon_verifier import verify_attestation  # noqa: E402 — lazy: only installed in Docker image
 
             # Extract base64 attestation document from the stored JSON
             att_doc = attestation
