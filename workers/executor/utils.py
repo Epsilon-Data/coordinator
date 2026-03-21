@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from workers.executor.settings import get_settings
+
 
 class ContextFilter(logging.Filter):
     """Add context information to log records."""
@@ -28,8 +30,6 @@ def setup_logging(
     log_file: Optional[str] = None
 ) -> logging.Logger:
     """Set up logging configuration."""
-    from workers.executor.settings import get_settings
-
     settings = get_settings()
 
     log_level = level or settings.logging.level

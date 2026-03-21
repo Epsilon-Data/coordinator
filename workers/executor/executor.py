@@ -11,6 +11,7 @@ Flow:
 import json
 import os
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
@@ -522,8 +523,6 @@ class SecureExecutor(IExecutor):
 
     def cleanup_environment(self, job_id: str) -> None:
         """Clean up after job execution."""
-        import shutil
-
         if job_id in self._active_jobs:
             del self._active_jobs[job_id]
 

@@ -2,13 +2,20 @@
 Executor worker implementing high-level logic:
 fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
 """
+import json
 import os
 import sys
-import json
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
-from shared.db import job_repository
+from sqlalchemy import text
+
+try:
+    from epsilon_verifier import verify_attestation
+except ImportError:
+    verify_attestation = None
+
+from shared.db import db, job_repository
 from shared.base_worker import ExecutorWorkerBase
 from workers.executor.utils import get_logger, setup_logging
 from workers.executor.interfaces import IExecutor
@@ -16,7 +23,6 @@ from workers.executor.models import JobExecutionRequest, JobStatus
 from workers.executor.settings import get_settings, validate_and_raise
 from workers.executor.exceptions import ConfigurationError
 from workers.executor.factories import ExecutorFactory
-from sqlalchemy import text
 
 
 class ExecutorWorker(ExecutorWorkerBase):
@@ -55,7 +61,6 @@ class ExecutorWorker(ExecutorWorkerBase):
     def _stamp_boot_ready(self) -> None:
         """Update the most recent boot_events row with boot_ready_at timestamp."""
         try:
-            from shared.db import db
             with db.get_session() as session:
                 session.execute(
                     text(
@@ -96,7 +101,8 @@ class ExecutorWorker(ExecutorWorkerBase):
     def _verify_attestation(self, job_id: str, attestation: Any, logger) -> Optional[str]:
         """Verify attestation document and return a JSON verification receipt."""
         try:
-            from epsilon_verifier import verify_attestation
+            if verify_attestation is None:
+                raise ImportError("epsilon_verifier not installed")
 
             # Extract base64 attestation document from the stored JSON
             att_doc = attestation

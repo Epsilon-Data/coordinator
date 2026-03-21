@@ -1,11 +1,12 @@
-import json
 import logging
 from crewai import Crew
 
+from shared.job_logger import JobLogger
 from workers.ai_agent.agents import create_policy_agent, create_analyzer_agent, create_decision_agent
 from workers.ai_agent.tasks import create_policy_task, create_analyzer_task, create_decision_task
 from workers.ai_agent.tools import CodeExecutorTool, PolicyLoaderTool, ASTSecurityScanner, OutputDisclosureTool
 from workers.ai_agent.schemas import AnalysisDecision
+from workers.ai_agent.security_constants import CREWAI_OUTPUT_MAX_LENGTH
 from workers.ai_agent.utils import find_main_script
 
 logging.basicConfig(
@@ -81,7 +82,6 @@ def analyze_repository(repo_path: str, job_id: str) -> AnalysisDecision:
         decision_task = create_decision_task(decision_agent, job_id)
 
         # Store CrewAI step logs in DB via job_logger
-        from shared.job_logger import JobLogger
         _job_logger = JobLogger("AIAgentWorker")
 
         def _task_callback(task_output):
@@ -90,14 +90,14 @@ def analyze_repository(repo_path: str, job_id: str) -> AnalysisDecision:
                 agent_name = str(getattr(task_output, 'agent', 'Unknown'))
                 raw_output = str(getattr(task_output, 'raw', ''))
                 # Truncate very long outputs but keep enough for meaningful display
-                output_text = raw_output[:2000] if len(raw_output) > 2000 else raw_output
+                output_text = raw_output[:CREWAI_OUTPUT_MAX_LENGTH] if len(raw_output) > CREWAI_OUTPUT_MAX_LENGTH else raw_output
                 _job_logger.info(
                     job_id, "ai_crew_task",
                     f"[{agent_name}] {output_text}",
                     metadata={
                         "agent": agent_name,
                         "output_length": len(raw_output),
-                        "truncated": len(raw_output) > 2000,
+                        "truncated": len(raw_output) > CREWAI_OUTPUT_MAX_LENGTH,
                     }
                 )
             except Exception as e:

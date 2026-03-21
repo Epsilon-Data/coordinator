@@ -127,5 +127,8 @@ class TestPolicyLoaderTool:
 
             assert policy["name"] == "Enclave Code Security Policy"
             assert len(policy["blocked_imports"]) > 0
+            # Verify constants are used (not hardcoded duplicates)
+            assert "socket" in policy["blocked_imports"]
+            assert "pandas" in policy["safe_imports"]
         finally:
             shutil.rmtree(tmpdir)

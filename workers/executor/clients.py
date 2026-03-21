@@ -22,7 +22,13 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
+try:
+    from workers.executor.local_attestation import generate_local_attestation
+except ImportError:
+    generate_local_attestation = None
+
 from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
+from workers.executor.services import CryptoService
 from workers.executor.exceptions import EnclaveConnectionError
 from workers.executor.settings import get_settings, ProxyConfig
 from workers.executor.constants import EnclaveOperations, MiddlewareModes
@@ -69,8 +75,6 @@ class EnclaveClient(IEnclaveClient):
     """Production client for communicating with Nitro Enclave via VSock."""
 
     def __init__(self, enclave_cid: int = None):
-        from workers.executor.services import CryptoService
-
         self._settings = get_settings()
         self._crypto = CryptoService()
         # Use provided CID, or external CID from settings, or auto-detect
@@ -320,8 +324,6 @@ class EnclaveClientLocal(IEnclaveClient):
     """Local enclave client for development and testing."""
 
     def __init__(self, enclave_cid: Optional[int] = None):
-        from workers.executor.services import CryptoService
-
         self._settings = get_settings()
         self._crypto = CryptoService()
         self._sessions: Dict[str, RSAPrivateKey] = {}
@@ -391,10 +393,6 @@ class EnclaveClientLocal(IEnclaveClient):
     ) -> Optional[Dict]:
         """Generate a local attestation document after successful execution."""
         try:
-            import hashlib
-            import json
-            import time as _time
-
             # Build user_data hash bundle (same structure as real enclave)
             script_hash = hashlib.sha256(decrypted_zip).hexdigest() if decrypted_zip else ""
             dataset_hash = hashlib.sha256(decrypted_csv).hexdigest() if decrypted_csv else ""
@@ -405,11 +403,12 @@ class EnclaveClientLocal(IEnclaveClient):
                 "script_hash": script_hash,
                 "dataset_hash": dataset_hash,
                 "output_hash": output_hash,
-                "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "nonce": hashlib.sha256(session_id.encode()).hexdigest()[:32],
             }).encode()
 
-            from implementations.local_attestation_service import generate_local_attestation
+            if generate_local_attestation is None:
+                raise ImportError("local_attestation module not available (cbor2 not installed)")
 
             ok, result = generate_local_attestation(
                 user_data=user_data,

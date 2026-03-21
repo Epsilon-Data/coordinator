@@ -1,15 +1,18 @@
+import json
 import os
 import subprocess
 import tempfile
 import shutil
 import time
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List
 
 from crewai.tools import BaseTool
 
 from workers.ai_agent.schemas import ExecutionResult
+from workers.ai_agent.security_constants import PIP_INSTALL_TIMEOUT, SCRIPT_EXECUTION_TIMEOUT, OUTPUT_FILE_MAX_READ_SIZE
 from workers.ai_agent.utils import find_main_script, find_requirements_path, MAIN_SCRIPT_FALLBACKS
 
 logger = logging.getLogger(__name__)
@@ -80,7 +83,7 @@ class CodeExecutorTool(BaseTool):
                     cwd=execution_path,
                     capture_output=True,
                     text=True,
-                    timeout=300
+                    timeout=PIP_INSTALL_TIMEOUT
                 )
                 return True
             except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
@@ -130,7 +133,7 @@ class CodeExecutorTool(BaseTool):
                 cwd=execution_path,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=SCRIPT_EXECUTION_TIMEOUT,
                 env=env
             )
             end_time = time.time()
@@ -153,7 +156,7 @@ class CodeExecutorTool(BaseTool):
                 stdout="",
                 stderr="Execution timed out",
                 return_code=-1,
-                execution_time=60,
+                execution_time=SCRIPT_EXECUTION_TIMEOUT,
                 output_files=[],
                 error_message="Execution timed out"
             )
@@ -201,7 +204,7 @@ class CodeExecutorTool(BaseTool):
                         }
 
                         # Read small files for content analysis
-                        if file_path.stat().st_size < 10000:  # Less than 10KB
+                        if file_path.stat().st_size < OUTPUT_FILE_MAX_READ_SIZE:
                             try:
                                 with open(file_path, 'r', encoding='utf-8') as f:
                                     file_info["content"] = f.read()
@@ -217,11 +220,8 @@ class CodeExecutorTool(BaseTool):
 
         return output_files
 
-    def _save_ai_execution_result(self, job_id: str, execution_result: ExecutionResult):
-        """Save AI execution results for debugging and analysis"""
-        import json
-        from datetime import datetime, timezone
-
+    def _save_ai_execution_result(self, job_id: str, execution_result: ExecutionResult) -> None:
+        """Save AI execution results for debugging and analysis."""
         # Create AI execution results directory
         shared_storage_path = Path(os.environ.get('SHARED_STORAGE_PATH', '/shared/epsilon'))
         ai_exec_path = shared_storage_path / "ai_execution_results" / job_id

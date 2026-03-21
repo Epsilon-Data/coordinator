@@ -1,16 +1,21 @@
 import json
+from typing import List, Optional
+
 from crewai import Task, Agent
+
 from workers.ai_agent.schemas import ExecutionResult
+from workers.ai_agent.tools.ast_scanner_tool import ScanReport
+from workers.ai_agent.tools.output_disclosure_tool import OutputReport
 
 
 def create_analyzer_task(
     agent: Agent,
     execution_result: ExecutionResult,
-    pii_fields: list,
+    pii_fields: List[str],
     main_script_content: str = "",
     script_filename: str = "",
-    ast_report=None,
-    output_report=None,
+    ast_report: Optional[ScanReport] = None,
+    output_report: Optional[OutputReport] = None,
 ) -> Task:
     """Create code analysis task using deterministic scanner results."""
 
