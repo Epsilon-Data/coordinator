@@ -22,6 +22,11 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
+try:
+    from workers.executor.local_attestation import generate_local_attestation
+except ImportError:
+    generate_local_attestation = None
+
 from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
 from workers.executor.services import CryptoService
 from workers.executor.exceptions import EnclaveConnectionError
@@ -402,7 +407,8 @@ class EnclaveClientLocal(IEnclaveClient):
                 "nonce": hashlib.sha256(session_id.encode()).hexdigest()[:32],
             }).encode()
 
-            from workers.executor.local_attestation import generate_local_attestation  # noqa: E402 — lazy: cbor2 only in Docker
+            if generate_local_attestation is None:
+                raise ImportError("local_attestation module not available (cbor2 not installed)")
 
             ok, result = generate_local_attestation(
                 user_data=user_data,
