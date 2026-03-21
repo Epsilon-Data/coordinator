@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0](https://github.com/Epsilon-Data/coordinator/compare/v1.1.3...v1.2.0) (2026-03-21)
+
+
+### Features
+
+* **ai-agent:** AST scanner, output disclosure checker, hardened pipeline ([dd38db6](https://github.com/Epsilon-Data/coordinator/commit/dd38db6be1d39d998d5714b190ce15560d883795))
+* **ai-agent:** AST scanner, output disclosure checker, hardened pipeline ([7acb503](https://github.com/Epsilon-Data/coordinator/commit/7acb503a8ad6c9da5ed9398061fb3718aa0881e8))
+* **ai-agent:** production-hardening with AST scanner, output disclosure checker, and structured LLM reasoning ([1cc84f7](https://github.com/Epsilon-Data/coordinator/commit/1cc84f7cc37c15c5d4b1921054475ffb7af27fae))
+
+
+### Bug Fixes
+
+* **ci:** install ai-agent deps in CI pipeline for test collection ([604ccd9](https://github.com/Epsilon-Data/coordinator/commit/604ccd987c9a41023174bf8ea20b28e82bdf6473))
+* **tests:** update clone and executor tests to match new job status flow ([8d12468](https://github.com/Epsilon-Data/coordinator/commit/8d12468f2dcf3773379b60eacb7a5be257a71dce))
+
 ## [1.1.3](https://github.com/Epsilon-Data/coordinator/compare/v1.1.2...v1.1.3) (2026-03-16)
 
 
