@@ -67,10 +67,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
 
-      - name: Clone epsilon-attestation-verifier
-        run: |
-          git clone https://x-access-token:${{ secrets.GHCR_PAT }}@github.com/Epsilon-Data/epsilon-attestation-verifier.git epsilon-attestation-verifier
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

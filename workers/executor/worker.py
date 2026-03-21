@@ -10,11 +10,7 @@ from typing import Dict, Any, Optional
 
 from sqlalchemy import text
 
-try:
-    from epsilon_verifier import verify_attestation
-except ImportError:
-    verify_attestation = None
-
+from epsilon_verifier import verify_attestation
 from shared.db import db, job_repository
 from shared.base_worker import ExecutorWorkerBase
 from workers.executor.utils import get_logger, setup_logging
@@ -101,9 +97,6 @@ class ExecutorWorker(ExecutorWorkerBase):
     def _verify_attestation(self, job_id: str, attestation: Any, logger) -> Optional[str]:
         """Verify attestation document and return a JSON verification receipt."""
         try:
-            if verify_attestation is None:
-                raise ImportError("epsilon_verifier not installed")
-
             # Extract base64 attestation document from the stored JSON
             att_doc = attestation
             if isinstance(att_doc, str):

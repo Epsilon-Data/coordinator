@@ -27,6 +27,7 @@ job-fetcher = []
 executor = [
     "boto3>=1.26.0",
     "cryptography>=41.0.0",
+    "epsilon-attestation-verifier>=1.0.0",
     "pydantic>=2.4.0",
     "requests>=2.31.0",
     "pyyaml>=6.0",
