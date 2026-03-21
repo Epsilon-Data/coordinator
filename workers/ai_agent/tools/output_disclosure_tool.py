@@ -17,10 +17,11 @@ from typing import Dict, Any, List
 
 from crewai.tools import BaseTool
 
-logger = logging.getLogger(__name__)
+from workers.ai_agent.security_constants import (
+    BASE64_MIN_LENGTH, BASE64_MIN_DECODED_SIZE, EVIDENCE_SNIPPET_LENGTH,
+)
 
-# Minimum group size threshold (OpenSAFELY uses 7, ACRO uses 10)
-MIN_GROUP_SIZE = 10
+logger = logging.getLogger(__name__)
 
 # Patterns that suggest credential/system info leakage
 CREDENTIAL_PATTERNS = [
@@ -165,7 +166,7 @@ class OutputDisclosureTool(BaseTool):
                     category="credential_leak",
                     severity="critical",
                     detail=f"{description} found in {source}",
-                    evidence=matches[0][:40] + "..." if len(matches[0]) > 40 else matches[0],
+                    evidence=matches[0][:EVIDENCE_SNIPPET_LENGTH] + "..." if len(matches[0]) > EVIDENCE_SNIPPET_LENGTH else matches[0],
                 ))
 
     def _check_text_for_system_info(self, text: str, source: str, findings: List[OutputFinding]):
@@ -183,20 +184,18 @@ class OutputDisclosureTool(BaseTool):
 
     def _check_text_for_encoded_data(self, text: str, source: str, findings: List[OutputFinding]):
         """Check for base64-encoded blocks that could be exfiltration."""
-        # Look for long base64 strings (>100 chars of continuous base64 alphabet)
-        b64_pattern = r'[A-Za-z0-9+/]{100,}={0,2}'
+        b64_pattern = rf'[A-Za-z0-9+/]{{{BASE64_MIN_LENGTH},}}={{0,2}}'
         matches = re.findall(b64_pattern, text)
         for match in matches:
-            # Verify it's actually valid base64
             try:
                 decoded = base64.b64decode(match)
-                if len(decoded) > 50:  # Non-trivial content
+                if len(decoded) > BASE64_MIN_DECODED_SIZE:
                     findings.append(OutputFinding(
                         source=source,
                         category="encoded_data",
                         severity="high",
                         detail=f"Base64-encoded block ({len(match)} chars) found in {source} — possible data exfiltration via output",
-                        evidence=match[:40] + "...",
+                        evidence=match[:EVIDENCE_SNIPPET_LENGTH] + "...",
                     ))
-            except Exception:
-                pass  # Not valid base64, ignore
+            except (base64.binascii.Error, ValueError):
+                pass  # Not valid base64

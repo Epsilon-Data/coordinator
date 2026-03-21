@@ -9,6 +9,8 @@ from functools import lru_cache
 
 from dotenv import load_dotenv
 
+from workers.executor.exceptions import ConfigurationError
+
 # Find project root and load .env
 _current_dir = Path(__file__).resolve().parent
 _project_root = _current_dir.parent.parent
@@ -228,8 +230,6 @@ def check_permissions(settings: Settings) -> Tuple[bool, List[str]]:
 
 def validate_and_raise(settings: Settings) -> None:
     """Validate configuration and raise exception if invalid."""
-    from workers.executor.exceptions import ConfigurationError
-
     env_valid, env_errors = validate_environment(settings)
     perm_valid, perm_errors = check_permissions(settings)
 

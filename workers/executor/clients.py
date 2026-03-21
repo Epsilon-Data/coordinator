@@ -391,10 +391,6 @@ class EnclaveClientLocal(IEnclaveClient):
     ) -> Optional[Dict]:
         """Generate a local attestation document after successful execution."""
         try:
-            import hashlib
-            import json
-            import time as _time
-
             # Build user_data hash bundle (same structure as real enclave)
             script_hash = hashlib.sha256(decrypted_zip).hexdigest() if decrypted_zip else ""
             dataset_hash = hashlib.sha256(decrypted_csv).hexdigest() if decrypted_csv else ""
@@ -405,7 +401,7 @@ class EnclaveClientLocal(IEnclaveClient):
                 "script_hash": script_hash,
                 "dataset_hash": dataset_hash,
                 "output_hash": output_hash,
-                "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "nonce": hashlib.sha256(session_id.encode()).hexdigest()[:32],
             }).encode()
 

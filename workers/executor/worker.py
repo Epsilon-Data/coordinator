@@ -2,11 +2,13 @@
 Executor worker implementing high-level logic:
 fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
 """
+import json
 import os
 import sys
-import json
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
+
+from sqlalchemy import text
 
 from shared.db import job_repository
 from shared.base_worker import ExecutorWorkerBase
@@ -16,7 +18,6 @@ from workers.executor.models import JobExecutionRequest, JobStatus
 from workers.executor.settings import get_settings, validate_and_raise
 from workers.executor.exceptions import ConfigurationError
 from workers.executor.factories import ExecutorFactory
-from sqlalchemy import text
 
 
 class ExecutorWorker(ExecutorWorkerBase):
