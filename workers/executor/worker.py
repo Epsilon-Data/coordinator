@@ -48,15 +48,42 @@ class ExecutorWorker(ExecutorWorkerBase):
 
         self._executor = executor
 
-        # Check if executor is ready
-        if not self._executor.is_ready:
-            raise RuntimeError("Executor is not ready to accept jobs")
-
         logger = get_logger(__name__)
+
+        # Check if executor is ready — wait instead of crashing
+        if not self._executor.is_ready:
+            logger.warning("Enclave not ready, will retry on each polling cycle")
+
         logger.info(f"ExecutorWorker initialized for worker {self._settings.worker_id} in polling mode")
+
+        # Reset orphaned executing jobs back to cloned on boot
+        self._recover_orphaned_jobs()
 
         # Stamp boot_ready_at in boot_events table for boot time measurement
         self._stamp_boot_ready()
+
+    def _recover_orphaned_jobs(self) -> None:
+        """Reset jobs stuck in 'executing' back to 'cloned' on boot.
+
+        Handles the case where the enclave goes offline mid-execution
+        and jobs get orphaned in the 'executing' state.
+        """
+        logger = get_logger(__name__)
+        try:
+            from shared.db.models import JobRequest
+            from sqlalchemy import select
+            with db.get_session() as session:
+                orphaned = session.execute(
+                    select(JobRequest).where(JobRequest.status == 'executing')
+                ).scalars().all()
+                for job in orphaned:
+                    job.status = 'cloned'
+                    job.updated_at = datetime.now(timezone.utc)
+                    logger.warning(f"[BOOT] Recovered orphaned job {job.job_id} → cloned")
+                if not orphaned:
+                    logger.info("[BOOT] No orphaned jobs found")
+        except Exception as e:
+            logger.warning(f"[BOOT] Could not recover orphaned jobs: {e}")
 
     def _stamp_boot_ready(self) -> None:
         """Update the most recent boot_events row with boot_ready_at timestamp."""
@@ -176,7 +203,16 @@ class ExecutorWorker(ExecutorWorkerBase):
 
             logger.info(f"[REPO] Found repository at {repo_path}")
 
-            # Step 2: Create job request
+            # Step 2: Check enclave readiness before changing status
+            if not self._executor.is_ready:
+                logger.warning(f"[JOB] Enclave not ready — skipping job {job_id}, will retry next cycle")
+                return False
+
+            # Step 3: Mark job as executing (claimed)
+            job_repository.update_job_status(job_id=job_id, status='executing')
+            logger.info(f"[JOB] Job {job_id} status → executing")
+
+            # Step 4: Create job request
             job_request = JobExecutionRequest(
                 job_id=job_id,
                 repo_path=repo_path,
@@ -194,7 +230,7 @@ class ExecutorWorker(ExecutorWorkerBase):
                 }
             )
 
-            # Step 3: Execute using high-level logic (get public_key, zip, encrypt, send to enclave)
+            # Step 5: Execute using high-level logic (get public_key, zip, encrypt, send to enclave)
             result = self._executor.execute(job_request)
 
             # Update job status based on result
