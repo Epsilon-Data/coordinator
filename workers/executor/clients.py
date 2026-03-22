@@ -403,8 +403,7 @@ class EnclaveClientLocal(IEnclaveClient):
                 "script_hash": script_hash,
                 "dataset_hash": dataset_hash,
                 "output_hash": output_hash,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "nonce": hashlib.sha256(session_id.encode()).hexdigest()[:32],
+                "timestamp": int(time.time()),
             }).encode()
 
             if generate_local_attestation is None:
