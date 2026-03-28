@@ -20,6 +20,6 @@ jobs:
         id: release
         with:
           release-type: python
-          token: ${{ secrets.GHCR_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           manifest-file: .release-please-manifest.json
           config-file: release-please-config.json
