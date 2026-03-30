@@ -1,7 +1,7 @@
 # Epsilon Coordinator
 
 [![CI/CD](https://github.com/Epsilon-Data/epsilon-coordinator/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/Epsilon-Data/epsilon-coordinator/actions/workflows/ci-cd.yml)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A secure job orchestration system for privacy-preserving analytics using **AWS Nitro Enclaves**. Data is encrypted end-to-end and only decrypted inside a hardware-isolated enclave, ensuring zero trust throughout the pipeline.
 
@@ -200,4 +200,4 @@ sequenceDiagram
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[MIT License](LICENSE)
