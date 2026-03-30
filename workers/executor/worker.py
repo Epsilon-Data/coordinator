@@ -23,6 +23,8 @@ from workers.executor.models import JobExecutionRequest, JobStatus
 from workers.executor.settings import get_settings, validate_and_raise
 from workers.executor.exceptions import ConfigurationError
 from workers.executor.factories import ExecutorFactory
+from workers.executor.atl_client import ATLClient
+from workers.executor.jac import sign_jac, compute_script_hash, compute_context_hash
 
 
 class ExecutorWorker(ExecutorWorkerBase):
@@ -48,7 +50,20 @@ class ExecutorWorker(ExecutorWorkerBase):
 
         self._executor = executor
 
+        # Initialize ATL client (opt-in via ATL_ENABLED=true)
+        self._atl_client = None
+        if self._settings.atl.is_configured:
+            self._atl_client = ATLClient.from_env()
+            # Pass ATL client to executor for pre-execution nonce/context steps
+            if self._atl_client and hasattr(self._executor, '_atl_client'):
+                self._executor._atl_client = self._atl_client
+
         logger = get_logger(__name__)
+
+        if self._atl_client:
+            logger.info("[ATL] Attestation Transparency Log integration enabled (url=%s)", self._settings.atl.url)
+        else:
+            logger.info("[ATL] ATL integration disabled (ATL_ENABLED=false or not configured)")
 
         # Check if executor is ready — wait instead of crashing
         if not self._executor.is_ready:
@@ -182,6 +197,57 @@ class ExecutorWorker(ExecutorWorkerBase):
                 "error": str(e),
             })
 
+    def _submit_to_atl(self, job_id: str, attestation: Any, job: Dict[str, Any], logger) -> Optional[Dict[str, Any]]:
+        """Submit a High-Assurance entry to the ATL after successful execution.
+
+        Extracts the raw attestation document and submits it as an HA entry.
+        Returns the ATL response (containing inclusion receipt) or None on failure.
+        """
+        try:
+            import base64
+
+            # Extract the raw attestation document bytes
+            att_doc = attestation
+            if isinstance(att_doc, str):
+                att_doc = json.loads(att_doc)
+
+            b64_doc = ""
+            if isinstance(att_doc, dict):
+                inner = att_doc.get("attestation", {})
+                if isinstance(inner, dict):
+                    b64_doc = inner.get("attestation_document", "")
+
+            if not b64_doc:
+                logger.warning(f"[ATL] No attestation_document for ATL submission, job {job_id}")
+                return None
+
+            raw_attestation = base64.b64decode(b64_doc)
+
+            # Extract nonce from attestation proof data (if available)
+            nonce = b'\x00' * 32  # fallback
+            proof = att_doc.get("attestation", {}).get("proof", {})
+            if proof and proof.get("nonce"):
+                nonce = base64.b64decode(proof["nonce"])
+
+            # Submit HA entry
+            success, result = self._atl_client.submit_ha_entry(
+                job_id=job_id,
+                tee_platform="aws-nitro",
+                attestation_doc=raw_attestation,
+                nonce=nonce,
+            )
+
+            if success:
+                logger.info(f"[ATL] HA entry submitted: leaf={result.get('leaf_index')}")
+                return result
+            else:
+                logger.warning(f"[ATL] HA entry submission failed for job {job_id}")
+                return None
+
+        except Exception as e:
+            logger.error(f"[ATL] Error submitting to ATL for job {job_id}: {e}")
+            return None
+
     def process_job(self, job: Dict[str, Any]) -> bool:
         """
         High-level logic: fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
@@ -240,6 +306,11 @@ class ExecutorWorker(ExecutorWorkerBase):
                 if result.attestation:
                     verification_receipt = self._verify_attestation(job_id, result.attestation, logger)
 
+                # Submit to ATL if enabled and attestation is present
+                atl_receipt = None
+                if self._atl_client and result.attestation:
+                    atl_receipt = self._submit_to_atl(job_id, result.attestation, job, logger)
+
                 # Extract enclave version and PCR0 for metadata tracking
                 enclave_version = os.environ.get("ENCLAVE_VERSION", "unknown")
                 enclave_pcr0 = None
@@ -265,6 +336,8 @@ class ExecutorWorker(ExecutorWorkerBase):
                     logger.info(f"[ATTESTATION] Stored attestation for job {job_id}")
                 if verification_receipt:
                     logger.info(f"[ATTESTATION] Verification receipt stored for job {job_id}")
+                if atl_receipt:
+                    logger.info(f"[ATL] Inclusion receipt stored for job {job_id}")
                 return True
             elif result.status == JobStatus.REJECTED:
                 # Build validation failed - no build folder or invalid build.yml
@@ -276,6 +349,16 @@ class ExecutorWorker(ExecutorWorkerBase):
                 logger.warning(f"[REJECTED] Job {job_id} rejected: {result.error}")
                 return False
             else:
+                # Submit Low-Assurance failure entry to ATL
+                if self._atl_client:
+                    error_class = result.status.value if result.status else "unknown"
+                    self._atl_client.submit_la_entry(
+                        job_id=job_id,
+                        error_class=error_class,
+                        error_detail=result.error or "unknown error",
+                    )
+                    logger.info(f"[ATL] Failure entry submitted for job {job_id}")
+
                 job_repository.update_job_status(
                     job_id=job_id,
                     status=JobStatus.FAILED.value,
@@ -286,6 +369,16 @@ class ExecutorWorker(ExecutorWorkerBase):
 
         except Exception as e:
             logger.error(f"[ERROR] Job {job_id} failed: {str(e)}")
+            # Submit LA entry for unexpected failures
+            if self._atl_client:
+                try:
+                    self._atl_client.submit_la_entry(
+                        job_id=job_id,
+                        error_class=type(e).__name__,
+                        error_detail=str(e),
+                    )
+                except Exception:
+                    pass
             job_repository.update_job_status(job_id=job_id, status=JobStatus.FAILED.value, error_message=str(e))
             return False
 
