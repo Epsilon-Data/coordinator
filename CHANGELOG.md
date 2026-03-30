@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.4](https://github.com/Epsilon-Data/coordinator/compare/v1.3.3...v1.3.4) (2026-03-30)
+
+
+### Bug Fixes
+
+* **ci:** add postgres service container for tests ([044084e](https://github.com/Epsilon-Data/coordinator/commit/044084e245a50fad888c4d5821f5d3257d6b65cc))
+* correct license reference from Apache to MIT in README ([d58993c](https://github.com/Epsilon-Data/coordinator/commit/d58993cb546d164053a5f7b470564a30e9f3bb13))
+* correct license reference from Apache to MIT in README ([c3aac50](https://github.com/Epsilon-Data/coordinator/commit/c3aac50ed5d38a4f30415660acff461c27c39b63))
+
 ## [1.2.0](https://github.com/Epsilon-Data/coordinator/compare/v1.1.3...v1.2.0) (2026-03-21)
 
 
