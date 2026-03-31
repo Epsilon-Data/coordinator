@@ -135,8 +135,8 @@ epsilon-coordinator/
 flowchart LR
     subgraph Coordinator
         F[Fetcher] -->|pending→queued| C[Clone]
-        C -->|queued→cloned| AI[AI Agent]
-        AI -->|analyzed| E[Executor]
+        C -->|queued→cloned| E[Executor]
+        C -.->|parallel| AI[AI Agent]
     end
 
     subgraph "Data Owner's Machine"
@@ -152,6 +152,7 @@ flowchart LR
 
     GH[GitHub Repo] -->|git clone| C
     E -->|results + attestation| API[Epsilon API]
+    AI -.->|metadata only| API
 ```
 
 ### Key Generation
