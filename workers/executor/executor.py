@@ -144,10 +144,11 @@ class SecureExecutor(IExecutor):
                 # Validate SQL query before sending to proxy
                 if proxy_info.sql_query:
                     _validate_sql_query(proxy_info.sql_query)
-                proxy_response = self._step_fetch_from_proxy(
+                proxy_response, proxy_timing = self._step_fetch_from_proxy(
                     job_id, request, public_key, proxy_info
                 )
                 step_timing['proxy_fetch_ms'] = round((time.time() - t0) * 1000, 2)
+                step_timing['proxy_detail'] = proxy_timing
                 t0 = time.time()
                 success, output, attestation, enclave_timing = self._step_execute_in_enclave(
                     job_id, session_id, encrypted_zip, proxy_response.encrypted_csv
@@ -282,27 +283,24 @@ class SecureExecutor(IExecutor):
     def _step_fetch_from_proxy(
         self, job_id: str, request: JobExecutionRequest,
         public_key: str, proxy_info: ProxyInfo
-    ) -> ProxyResponse:
+    ):
         """Step 5a (proxy): Fetch encrypted CSV through proxy tunnel.
 
         Gets attestation from enclave, then sends query through the proxy tunnel
-        to the data owner's database. Returns ProxyResponse with encrypted CSV.
+        to the data owner's database. Returns (ProxyResponse, timings_dict) where
+        timings_dict decomposes the proxy ingestion path into sub-stages for
+        per-execution evaluation (Rule 2 decomposition).
         """
         self._log.info(job_id, "proxy", "Fetching data through proxy tunnel", progress=85)
 
         if not self._proxy_client:
             raise RuntimeError("Proxy client not configured but proxy mode requested")
 
+        timings = {}
+
         try:
-            # Get attestation document with public key in user_data (JSON).
-            # The proxy verifies:
-            #   1. COSE_Sign1 signature → proves real Nitro enclave (AWS root cert)
-            #   2. public_key in user_data matches the public key in the request
-            #   3. Therefore the public key was generated inside a genuine enclave
-            #
-            # user_data is sent as raw JSON string (not base64) because the enclave's
-            # _get_attestation does .encode() on strings, and NSM stores bytes as-is.
-            # The proxy then json.Unmarshal(payload.UserData) to extract public_key.
+            # Stage A: Get attestation document from enclave (with public key bound in user_data).
+            t_attest = time.time()
             attestation_doc = ""
             try:
                 user_data_json = json.dumps({"public_key": public_key})
@@ -317,6 +315,7 @@ class SecureExecutor(IExecutor):
                     logger.warning(f"[PROXY] No attestation in response: {list(attestation_response.keys())}")
             except Exception as e:
                 logger.warning(f"[PROXY] Could not get attestation: {e}")
+            timings['get_attestation_ms'] = round((time.time() - t_attest) * 1000, 2)
 
             if not attestation_doc:
                 raise RuntimeError(
@@ -332,17 +331,38 @@ class SecureExecutor(IExecutor):
                 workspace_id=request.workspace_id
             )
 
-            # Health check before query (ProxyClient expects dict)
+            # Stage B: Proxy health check.
+            t_health = time.time()
             proxy_info_dict = proxy_info.model_dump()
             if not self._proxy_client.health_check(proxy_info_dict):
                 logger.warning(f"[PROXY] Health check failed for port {proxy_info.assigned_port}, proceeding anyway")
+            timings['proxy_health_ms'] = round((time.time() - t_health) * 1000, 2)
 
+            # Stage C: Proxy query over tunnel (includes server-side work + network transit).
+            t_query = time.time()
             proxy_response = self._proxy_client.fetch_encrypted_csv(
                 request=middleware_request,
                 public_key=public_key,
                 attestation_doc=attestation_doc,
                 proxy_info=proxy_info_dict
             )
+            proxy_query_total_ms = round((time.time() - t_query) * 1000, 2)
+            timings['proxy_query_total_ms'] = proxy_query_total_ms
+
+            # Stage D: Extract proxy server-side sub-stages from response metadata.
+            meta = proxy_response.metadata or {}
+            proxy_server_total_ms = float(meta.get('total_duration_ms', 0) or 0)
+            timings['proxy_server_total_ms'] = proxy_server_total_ms
+            timings['proxy_parse_ms'] = float(meta.get('parse_duration_ms', 0) or 0)
+            timings['proxy_hmac_verify_ms'] = float(meta.get('hmac_verify_duration_ms', 0) or 0)
+            timings['proxy_attestation_verify_ms'] = float(meta.get('attestation_verify_duration_ms', 0) or 0)
+            timings['proxy_sql_validate_ms'] = float(meta.get('sql_validate_duration_ms', 0) or 0)
+            timings['proxy_db_query_ms'] = float(meta.get('query_duration_ms', 0) or 0)
+            timings['proxy_encrypt_ms'] = float(meta.get('encryption_duration_ms', 0) or 0)
+            # Network transit = client-observed round-trip minus server-observed wall clock.
+            timings['proxy_network_rtt_ms'] = round(proxy_query_total_ms - proxy_server_total_ms, 2)
+
+            logger.info(f"[PROXY-TIMING] job={job_id} {timings}")
 
             self._log.info(
                 job_id, "proxy",
@@ -350,7 +370,7 @@ class SecureExecutor(IExecutor):
                 progress=90
             )
 
-            return proxy_response
+            return proxy_response, timings
 
         except Exception as e:
             self._log.error(job_id, "proxy", f"Failed to fetch from proxy: {e}", error=e)
