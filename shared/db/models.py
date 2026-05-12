@@ -63,6 +63,13 @@ class JobRequest(Base):
     enclave_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     enclave_pcr0: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # JAC / ATL: cryptographically committed identity bound into the public log.
+    # job_id_committed = SHA-256(researcher_nonce || operator_nonce). Distinct
+    # from the operational job_id primary key so deployed integrations are not
+    # affected. See migration 44be9b128f17.
+    job_id_committed: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    researcher_nonce: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
