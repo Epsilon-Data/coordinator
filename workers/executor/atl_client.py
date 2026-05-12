@@ -288,6 +288,25 @@ class ATLClient:
             logger.error("[ATL] Submission error: %s", e)
             return False, None
 
+    def fetch_entry(self, leaf_index: int) -> Optional[Dict[str, Any]]:
+        """Fetch a logged entry by leaf index from GET /v1/entries/{index}.
+
+        Returns the CBOR-decoded entry envelope on success, None otherwise.
+        Used by integration tests and auditors verifying inclusion.
+        """
+        try:
+            resp = self._client.get(f"{self.atl_url}/v1/entries/{leaf_index}")
+            if resp.status_code != 200:
+                logger.error(
+                    "[ATL] fetch_entry %d failed: %d %s",
+                    leaf_index, resp.status_code, resp.text,
+                )
+                return None
+            return cbor2.loads(resp.content)
+        except Exception as e:
+            logger.error("[ATL] fetch_entry %d exception: %s", leaf_index, e)
+            return None
+
     def close(self):
         """Close the HTTP client."""
         self._client.close()
