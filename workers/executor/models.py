@@ -27,6 +27,16 @@ class JobExecutionRequest(BaseModel):
     workspace_id: Optional[str] = Field(default=None, description="Workspace identifier")
     ai_decision: Optional[Dict[str, Any]] = Field(default_factory=dict)
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    # ATL / JAC fields. researcher_nonce is hex-encoded; absence triggers the
+    # Non-Compliant path (operator generates a fallback nonce). allow_stale lets
+    # callers explicitly opt into submission when the ATL is unreachable —
+    # otherwise commitment-then-dispatch refuses to proceed.
+    researcher_nonce: Optional[str] = Field(
+        default=None, description="Researcher-supplied 16-byte nonce, hex-encoded"
+    )
+    allow_stale: bool = Field(
+        default=False, description="If True, dispatch when ATL is unreachable (marks job Non-Compliant)"
+    )
 
     model_config = {"frozen": False, "extra": "ignore"}
 
