@@ -70,6 +70,12 @@ class JobRequest(Base):
     job_id_committed: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     researcher_nonce: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # ATL inclusion receipts. JSON-serialized; the ATL log itself is the
+    # authoritative source, this is a convenience copy so the portal can
+    # display tree_size / leaf_index without re-querying the log.
+    commitment_receipt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ha_receipt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

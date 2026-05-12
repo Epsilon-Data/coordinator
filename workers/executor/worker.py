@@ -27,6 +27,19 @@ from workers.executor.atl_client import ATLClient
 from workers.executor.jac import sign_jac, compute_script_hash, compute_context_hash
 
 
+def _atl_receipt_to_json(receipt: Optional[Dict[str, Any]]) -> Optional[str]:
+    """JSON-serialize an ATL inclusion response, hex-encoding any bytes values.
+
+    The ATL response dict contains a `receipt` field whose value is the raw
+    COSE_Sign1 envelope bytes; plain json.dumps would reject it. Hex-encoding
+    keeps the receipt round-trippable and column-storable.
+    """
+    if receipt is None:
+        return None
+    safe = {k: (v.hex() if isinstance(v, (bytes, bytearray)) else v) for k, v in receipt.items()}
+    return json.dumps(safe)
+
+
 class ExecutorWorker(ExecutorWorkerBase):
     """Database polling worker for processing job execution requests."""
 
@@ -347,6 +360,12 @@ class ExecutorWorker(ExecutorWorkerBase):
                     except (json.JSONDecodeError, TypeError, AttributeError):
                         pass
 
+                # Serialize ATL receipts to JSON-safe form (their inner
+                # `receipt` field is COSE_Sign1 raw bytes; hex-encode any
+                # bytes values so json.dumps in update_job_status succeeds).
+                commitment_receipt_json = _atl_receipt_to_json(result.commitment_receipt)
+                ha_receipt_json = _atl_receipt_to_json(result.ha_receipt)
+
                 job_repository.update_job_status(
                     job_id=job_id,
                     status=JobStatus.SUCCESS.value,
@@ -358,6 +377,8 @@ class ExecutorWorker(ExecutorWorkerBase):
                     enclave_pcr0=enclave_pcr0,
                     job_id_committed=result.job_id_committed,
                     researcher_nonce=result.researcher_nonce,
+                    commitment_receipt=commitment_receipt_json,
+                    ha_receipt=ha_receipt_json,
                 )
                 logger.info(f"[SUCCESS] Job {job_id} completed")
                 if result.attestation:
