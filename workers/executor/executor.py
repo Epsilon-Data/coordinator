@@ -606,6 +606,18 @@ class SecureExecutor(IExecutor):
     ) -> ExecutionResult:
         """Create execution result."""
         status = JobStatus.SUCCESS if success else JobStatus.FAILED
+
+        # Pull JAC / ATL artifacts stashed by Step 4b. Keyed by operational
+        # job_id so result construction doesn't need to know about
+        # job_id_committed. Missing keys are fine — pre-ATL jobs and
+        # ATL_ENABLED=false paths leave the dict empty.
+        job_state = self._active_jobs.get(job_id, {})
+        commitment_hash_bytes = job_state.get('commitment_hash')
+        commitment_hash_hex = (
+            commitment_hash_bytes.hex()
+            if isinstance(commitment_hash_bytes, bytes) else commitment_hash_bytes
+        )
+
         result = ExecutionResult(
             job_id=job_id,
             status=status,
@@ -615,7 +627,14 @@ class SecureExecutor(IExecutor):
             enclave_cid=getattr(self._enclave_client, 'enclave_cid', None),
             attestation=attestation,
             step_timing=step_timing,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
+            job_id_committed=job_state.get('job_id_committed'),
+            researcher_nonce=job_state.get('researcher_nonce'),
+            signed_jac=job_state.get('signed_jac'),
+            commitment_receipt=job_state.get('commitment_receipt'),
+            commitment_hash=commitment_hash_hex,
+            ha_receipt=job_state.get('ha_receipt'),
+            is_non_compliant=job_state.get('is_non_compliant', False),
         )
 
         if result.is_success:
