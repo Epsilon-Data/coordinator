@@ -206,7 +206,12 @@ class SecureExecutor(IExecutor):
                 researcher_nonce_hex = researcher_nonce.hex()
 
                 # 4b.3 — script_hash from the actual submitted script.
-                script_full_path = os.path.join(request.repo_path, request.script_path)
+                # The script_file is parsed from build.yml during Step 1 and
+                # lives at repo_path/build/<script_file>; request.script_path
+                # is a legacy field not used by the validator.
+                script_full_path = os.path.join(
+                    request.repo_path, 'build', build_config.script_file,
+                )
                 if not os.path.exists(script_full_path):
                     raise FileNotFoundError(f"Script not found: {script_full_path}")
                 with open(script_full_path, 'rb') as f:
