@@ -319,7 +319,8 @@ datasets: []
         assert success is True
         assert output == 'Script output'
         mock_enclave_client.send_encrypted_data_to_enclave.assert_called_once_with(
-            'session_123', 'encrypted_zip', 'encrypted_csv'
+            'session_123', 'encrypted_zip', 'encrypted_csv',
+            atl_nonce=None, atl_context_hash=None,
         )
 
     def test_create_result_success(self, secure_executor):
