@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 ENTRY_TYPE_HA = 1
 ENTRY_TYPE_LA = 2
 ENTRY_TYPE_CONFIG = 3
+ENTRY_TYPE_COMMITMENT = 4
+
+# SHA-256 commitment hash length in bytes (validated server-side).
+COMMITMENT_HASH_LEN = 32
 
 
 class ATLClient:
@@ -161,6 +165,84 @@ class ATLClient:
             5: signature,          # coordinator_signature
         }
         return self._submit_entry(entry)
+
+    def submit_commitment_entry(
+        self,
+        job_id: str,
+        commitment_hash: bytes,
+        coord_signature: bytes,
+        timestamp: Optional[int] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Submit a Commitment entry to the ATL.
+
+        Maps to Go entry.CommitmentEntry (epsilon-atl/internal/entry/types.go):
+            0: EntryType (= 4)
+            1: JobID
+            2: CommitmentHash (32 bytes, SHA-256 of full JAC payload)
+            3: CoordSignature (Ed25519 over job_id_bytes || commitment_hash)
+            4: SubmitterID
+            5: Timestamp
+
+        Args:
+            job_id: Mutually committed H(researcher_nonce || coordinator_nonce)
+            commitment_hash: SHA-256 of full JAC payload (exactly 32 bytes)
+            coord_signature: Ed25519 signature over (job_id.encode() || commitment_hash)
+            timestamp: Unix seconds (defaults to now)
+
+        Returns:
+            (success, response_dict). response_dict on success contains
+            leaf_index, tree_size, root_hash, timestamp, receipt (COSE_Sign1 bytes),
+            and timing breakdown.
+        """
+        if len(commitment_hash) != COMMITMENT_HASH_LEN:
+            raise ValueError(
+                f"commitment_hash must be {COMMITMENT_HASH_LEN} bytes (SHA-256), "
+                f"got {len(commitment_hash)}"
+            )
+
+        if timestamp is None:
+            timestamp = int(time.time())
+
+        entry = {
+            0: ENTRY_TYPE_COMMITMENT,
+            1: job_id,
+            2: commitment_hash,
+            3: coord_signature,
+            4: self.submitter_id,
+            5: timestamp,
+        }
+        return self._submit_entry(entry)
+
+    def sign_and_submit_commitment(
+        self,
+        job_id: str,
+        jac_payload_bytes: bytes,
+    ) -> Tuple[bytes, Optional[Dict[str, Any]]]:
+        """Compute commitment_hash, sign it, submit. Convenience for executor.py Step 4b.
+
+        The in-entry CoordSignature is verified server-side (epsilon-atl
+        policy.validateCommitment) so the entry is auditable offline against
+        the coordinator's published key.
+
+        Args:
+            job_id: Mutually committed job ID
+            jac_payload_bytes: Serialized JAC payload — the preimage of commitment_hash.
+                The full JAC stays held by the coordinator; only its hash is logged.
+
+        Returns:
+            (commitment_hash, response_dict). commitment_hash is always returned
+            (caller may need it for the held JAC even on submission failure);
+            response_dict is None if submission failed.
+        """
+        commitment_hash = hashlib.sha256(jac_payload_bytes).digest()
+        signed = job_id.encode() + commitment_hash
+        coord_signature = self._private_key.sign(signed)
+        ok, response = self.submit_commitment_entry(
+            job_id=job_id,
+            commitment_hash=commitment_hash,
+            coord_signature=coord_signature,
+        )
+        return commitment_hash, response if ok else None
 
     def _submit_entry(self, entry: dict) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Submit a CBOR entry to POST /v1/entries with coordinator signature."""
