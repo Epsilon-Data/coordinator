@@ -114,6 +114,23 @@ class LoggingConfig:
 
 
 @dataclass
+class ATLConfig:
+    """Attestation Transparency Log configuration.
+
+    ATL integration is opt-in: set ATL_ENABLED=true to enable.
+    When disabled, no ATL calls are made and the existing flow is unchanged.
+    """
+    enabled: bool = field(default_factory=lambda: os.getenv('ATL_ENABLED', 'false').lower() == 'true')
+    url: str = field(default_factory=lambda: os.getenv('ATL_URL', ''))
+    submitter_id: str = field(default_factory=lambda: os.getenv('ATL_SUBMITTER_ID', 'coordinator-default'))
+    signing_key_path: str = field(default_factory=lambda: os.getenv('ATL_SIGNING_KEY_PATH', ''))
+
+    @property
+    def is_configured(self) -> bool:
+        return self.enabled and bool(self.url) and bool(self.signing_key_path)
+
+
+@dataclass
 class Settings:
     """Main settings container."""
     aws: AWSConfig = field(default_factory=AWSConfig)
@@ -125,6 +142,7 @@ class Settings:
     coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
     middleware: MiddlewareConfig = field(default_factory=MiddlewareConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
+    atl: ATLConfig = field(default_factory=ATLConfig)
 
     worker_id: str = field(default_factory=lambda: os.getenv('WORKER_ID', 'executor-001'))
     environment: str = field(default_factory=lambda: os.getenv('ENVIRONMENT', 'development'))

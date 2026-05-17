@@ -82,12 +82,14 @@ class SecureExecutor(IExecutor):
         enclave_client: IEnclaveClient,
         settings: Settings,
         middleware_client: IMiddlewareClient,
-        proxy_client=None
+        proxy_client=None,
+        atl_client=None,
     ):
         self._enclave_client = enclave_client
         self._settings = settings
         self._middleware_client = middleware_client
         self._proxy_client = proxy_client
+        self._atl_client = atl_client
         self._zip_service = ZipService()
         self._log = JobLogger("ExecutorWorker")
         self._active_jobs: Dict[str, Dict[str, Any]] = {}
@@ -129,6 +131,46 @@ class SecureExecutor(IExecutor):
             t0 = time.time()
             encrypted_zip = self._step_zip_and_encrypt(job_id, request.repo_path, public_key)
             step_timing['zip_and_encrypt_ms'] = round((time.time() - t0) * 1000, 2)
+
+            # Step 4b: ATL freshness (if ATL enabled)
+            # Fetch current STH and derive nonce for freshness binding.
+            # The nonce will be passed to the enclave for inclusion in user_data.
+            atl_nonce = None
+            atl_context_hash = None
+            if hasattr(self, '_atl_client') and self._atl_client:
+                t0 = time.time()
+                try:
+                    from workers.executor.atl_client import ATLClient
+                    from workers.executor.jac import compute_context_hash as _ctx_hash
+                    sth = self._atl_client.fetch_sth()
+                    if sth:
+                        atl_nonce = self._atl_client.derive_nonce(sth)
+                        step_timing['atl_sth_fetch_ms'] = round((time.time() - t0) * 1000, 2)
+                        logger.info(f"[ATL] Freshness nonce derived from STH (tree_size={sth.get('tree_size', '?')})")
+                    else:
+                        step_timing['atl_sth_fetch_ms'] = round((time.time() - t0) * 1000, 2)
+                        logger.warning("[ATL] Could not fetch STH — using random nonce (non-compliant)")
+
+                    # Compute context_hash from job metadata
+                    commit_sha = request.ai_decision.get('commit_sha', '') if request.ai_decision else ''
+                    archetype_id = build_config.datasets[0].archetype_id if build_config.datasets else ''
+                    dataset_id = build_config.datasets[0].dataset_id if build_config.datasets else ''
+                    atl_context_hash = _ctx_hash(
+                        job_id=request.job_id,
+                        commit_sha=commit_sha,
+                        archetype_id=archetype_id,
+                        dataset_id=dataset_id,
+                    )
+                    logger.info(f"[ATL] context_hash={atl_context_hash[:16]}...")
+                except Exception as e:
+                    logger.warning(f"[ATL] Pre-execution ATL step failed (non-fatal): {e}")
+                    step_timing['atl_sth_fetch_ms'] = round((time.time() - t0) * 1000, 2)
+
+            # Store ATL params for post-execution submission
+            self._active_jobs[job_id] = {
+                'atl_nonce': atl_nonce,
+                'atl_context_hash': atl_context_hash,
+            }
 
             # Step 5: Execute in enclave (branch on mode)
             t0 = time.time()
