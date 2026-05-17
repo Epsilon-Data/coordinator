@@ -27,6 +27,19 @@ from workers.executor.atl_client import ATLClient
 from workers.executor.jac import sign_jac, compute_script_hash, compute_context_hash
 
 
+def _atl_receipt_to_json(receipt: Optional[Dict[str, Any]]) -> Optional[str]:
+    """JSON-serialize an ATL inclusion response, hex-encoding any bytes values.
+
+    The ATL response dict contains a `receipt` field whose value is the raw
+    COSE_Sign1 envelope bytes; plain json.dumps would reject it. Hex-encoding
+    keeps the receipt round-trippable and column-storable.
+    """
+    if receipt is None:
+        return None
+    safe = {k: (v.hex() if isinstance(v, (bytes, bytearray)) else v) for k, v in receipt.items()}
+    return json.dumps(safe)
+
+
 class ExecutorWorker(ExecutorWorkerBase):
     """Database polling worker for processing job execution requests."""
 
@@ -197,11 +210,23 @@ class ExecutorWorker(ExecutorWorkerBase):
                 "error": str(e),
             })
 
-    def _submit_to_atl(self, job_id: str, attestation: Any, job: Dict[str, Any], logger) -> Optional[Dict[str, Any]]:
+    def _submit_to_atl(
+        self,
+        job_id: str,
+        attestation: Any,
+        job: Dict[str, Any],
+        logger,
+        job_id_committed: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Submit a High-Assurance entry to the ATL after successful execution.
 
         Extracts the raw attestation document and submits it as an HA entry.
         Returns the ATL response (containing inclusion receipt) or None on failure.
+
+        When job_id_committed is provided (jobs that passed commitment-then-
+        dispatch), the HA entry's job_id field is set to it so HA pairs with
+        the prior Commitment in the public log. Falls back to the operational
+        job_id for jobs that did not run Step 4b.
         """
         try:
             import base64
@@ -229,16 +254,21 @@ class ExecutorWorker(ExecutorWorkerBase):
             if proof and proof.get("nonce"):
                 nonce = base64.b64decode(proof["nonce"])
 
-            # Submit HA entry
+            # Submit HA entry. job_id field uses the committed identity when
+            # available so HA pairs with the prior Commitment in the log.
+            ha_job_id = job_id_committed or job_id
             success, result = self._atl_client.submit_ha_entry(
-                job_id=job_id,
+                job_id=ha_job_id,
                 tee_platform="aws-nitro",
                 attestation_doc=raw_attestation,
                 nonce=nonce,
             )
 
             if success:
-                logger.info(f"[ATL] HA entry submitted: leaf={result.get('leaf_index')}")
+                logger.info(
+                    f"[ATL] HA entry submitted: leaf={result.get('leaf_index')} "
+                    f"ha_job_id={ha_job_id[:16]}..."
+                )
                 return result
             else:
                 logger.warning(f"[ATL] HA entry submission failed for job {job_id}")
@@ -306,10 +336,19 @@ class ExecutorWorker(ExecutorWorkerBase):
                 if result.attestation:
                     verification_receipt = self._verify_attestation(job_id, result.attestation, logger)
 
-                # Submit to ATL if enabled and attestation is present
+                # Submit to ATL if enabled and attestation is present. Pass
+                # the committed job_id so the HA entry pairs with the prior
+                # Commitment in the public log. Propagate the receipt back
+                # into the result so the API caller sees the inclusion proof
+                # alongside signed_jac and commitment_receipt.
                 atl_receipt = None
                 if self._atl_client and result.attestation:
-                    atl_receipt = self._submit_to_atl(job_id, result.attestation, job, logger)
+                    atl_receipt = self._submit_to_atl(
+                        job_id, result.attestation, job, logger,
+                        job_id_committed=result.job_id_committed,
+                    )
+                    if atl_receipt is not None:
+                        result.ha_receipt = atl_receipt
 
                 # Extract enclave version and PCR0 for metadata tracking
                 enclave_version = os.environ.get("ENCLAVE_VERSION", "unknown")
@@ -321,6 +360,12 @@ class ExecutorWorker(ExecutorWorkerBase):
                     except (json.JSONDecodeError, TypeError, AttributeError):
                         pass
 
+                # Serialize ATL receipts to JSON-safe form (their inner
+                # `receipt` field is COSE_Sign1 raw bytes; hex-encode any
+                # bytes values so json.dumps in update_job_status succeeds).
+                commitment_receipt_json = _atl_receipt_to_json(result.commitment_receipt)
+                ha_receipt_json = _atl_receipt_to_json(result.ha_receipt)
+
                 job_repository.update_job_status(
                     job_id=job_id,
                     status=JobStatus.SUCCESS.value,
@@ -329,7 +374,11 @@ class ExecutorWorker(ExecutorWorkerBase):
                     verification_receipt=verification_receipt,
                     execution_metrics=result.step_timing,
                     enclave_version=enclave_version,
-                    enclave_pcr0=enclave_pcr0
+                    enclave_pcr0=enclave_pcr0,
+                    job_id_committed=result.job_id_committed,
+                    researcher_nonce=result.researcher_nonce,
+                    commitment_receipt=commitment_receipt_json,
+                    ha_receipt=ha_receipt_json,
                 )
                 logger.info(f"[SUCCESS] Job {job_id} completed")
                 if result.attestation:

@@ -11,6 +11,7 @@ Flow:
 import json
 import os
 import re
+import secrets
 import shutil
 import time
 from datetime import datetime, timezone
@@ -19,6 +20,12 @@ from typing import Dict, Any, Optional
 from workers.executor.settings import Settings
 from workers.executor.constants import EnclaveOperations, MiddlewareModes
 from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyInfo, ProxyResponse
+from workers.executor.jac import (
+    compute_context_hash,
+    compute_job_id,
+    compute_script_hash,
+    sign_jac,
+)
 from workers.executor.models import JobExecutionRequest, ExecutionResult, BuildConfig, JobStatus
 from workers.executor.exceptions import BuildValidationError
 from workers.executor.services import BuildValidator, ZipService
@@ -132,44 +139,150 @@ class SecureExecutor(IExecutor):
             encrypted_zip = self._step_zip_and_encrypt(job_id, request.repo_path, public_key)
             step_timing['zip_and_encrypt_ms'] = round((time.time() - t0) * 1000, 2)
 
-            # Step 4b: ATL freshness (if ATL enabled)
-            # Fetch current STH and derive nonce for freshness binding.
-            # The nonce will be passed to the enclave for inclusion in user_data.
+            # Step 4b: JAC + Commitment (commitment-then-dispatch).
+            # Paper §3.4.1, §4.2: the central protocol contribution. Sign a
+            # JAC, submit a Commitment entry to the public log, and BLOCK on
+            # the inclusion receipt before dispatching to the enclave. A
+            # logged Commitment paired with no corresponding HA entry within
+            # MMD is non-repudiable suppression evidence detectable from the
+            # public log alone.
+            #
+            # Operates under the two-ID model: the operational request.job_id
+            # is the platform-assigned primary key used throughout the
+            # pipeline (logs, DB, API responses). The cryptographically
+            # committed job_id_committed = H(researcher_nonce || operator_nonce)
+            # is what gets bound into the JAC, Commitment entry, and HA
+            # attestation. The mapping is persisted post-execution.
+            signed_jac = None
+            commitment_receipt = None
+            commitment_hash = None
+            job_id_committed = None
+            researcher_nonce_hex = None
             atl_nonce = None
             atl_context_hash = None
-            if hasattr(self, '_atl_client') and self._atl_client:
+            is_non_compliant = False
+
+            if self._atl_client:
+                # 4b.1 — Freshness nonce from current STH (paper §3.5).
                 t0 = time.time()
-                try:
-                    from workers.executor.atl_client import ATLClient
-                    from workers.executor.jac import compute_context_hash as _ctx_hash
-                    sth = self._atl_client.fetch_sth()
-                    if sth:
-                        atl_nonce = self._atl_client.derive_nonce(sth)
-                        step_timing['atl_sth_fetch_ms'] = round((time.time() - t0) * 1000, 2)
-                        logger.info(f"[ATL] Freshness nonce derived from STH (tree_size={sth.get('tree_size', '?')})")
-                    else:
-                        step_timing['atl_sth_fetch_ms'] = round((time.time() - t0) * 1000, 2)
-                        logger.warning("[ATL] Could not fetch STH — using random nonce (non-compliant)")
+                sth = self._atl_client.fetch_sth()
+                step_timing['atl_sth_fetch_ms'] = round((time.time() - t0) * 1000, 2)
 
-                    # Compute context_hash from job metadata
-                    commit_sha = request.ai_decision.get('commit_sha', '') if request.ai_decision else ''
-                    archetype_id = build_config.datasets[0].archetype_id if build_config.datasets else ''
-                    dataset_id = build_config.datasets[0].dataset_id if build_config.datasets else ''
-                    atl_context_hash = _ctx_hash(
-                        job_id=request.job_id,
-                        commit_sha=commit_sha,
-                        archetype_id=archetype_id,
-                        dataset_id=dataset_id,
+                if sth is None:
+                    # Safety-over-availability (paper §3.4.2). Refuse unless
+                    # the caller has explicitly opted in via allow_stale, in
+                    # which case the job is marked Non-Compliant.
+                    if not request.allow_stale:
+                        raise RuntimeError(
+                            "ATL unreachable; refusing to submit "
+                            "(safety-over-availability). Set allow_stale=True "
+                            "to override (marks job Non-Compliant)."
+                        )
+                    atl_nonce = secrets.token_bytes(32)
+                    is_non_compliant = True
+                    self._log.warning(
+                        job_id, "atl",
+                        "ATL offline and allow_stale=True; job will be marked Non-Compliant",
                     )
-                    logger.info(f"[ATL] context_hash={atl_context_hash[:16]}...")
-                except Exception as e:
-                    logger.warning(f"[ATL] Pre-execution ATL step failed (non-fatal): {e}")
-                    step_timing['atl_sth_fetch_ms'] = round((time.time() - t0) * 1000, 2)
+                else:
+                    atl_nonce = self._atl_client.derive_nonce(sth)
 
-            # Store ATL params for post-execution submission
+                # 4b.2 — Mutually committed job_id = H(r || o). If the
+                # researcher did not supply r, generate one server-side and
+                # mark the job Non-Compliant: mutual commitment is the
+                # property the paper relies on.
+                if request.researcher_nonce:
+                    researcher_nonce = bytes.fromhex(request.researcher_nonce)
+                else:
+                    researcher_nonce = secrets.token_bytes(16)
+                    if not is_non_compliant:
+                        is_non_compliant = True
+                        self._log.warning(
+                            job_id, "atl",
+                            "No researcher_nonce supplied; job will be marked Non-Compliant",
+                        )
+                operator_nonce = secrets.token_bytes(16)
+                job_id_committed = compute_job_id(researcher_nonce, operator_nonce)
+                researcher_nonce_hex = researcher_nonce.hex()
+
+                # 4b.3 — script_hash from the actual submitted script.
+                # The script_file is parsed from build.yml during Step 1 and
+                # lives at repo_path/build/<script_file>; request.script_path
+                # is a legacy field not used by the validator.
+                script_full_path = os.path.join(
+                    request.repo_path, 'build', build_config.script_file,
+                )
+                if not os.path.exists(script_full_path):
+                    raise FileNotFoundError(f"Script not found: {script_full_path}")
+                with open(script_full_path, 'rb') as f:
+                    script_bytes = f.read()
+                script_hash = compute_script_hash(script_bytes)
+
+                # 4b.4 — context_hash binding entry metadata to user_data.
+                commit_sha = (
+                    request.ai_decision.get('commit_sha', '') if request.ai_decision else ''
+                )
+                archetype_id = (
+                    build_config.datasets[0].archetype_id if build_config.datasets else ''
+                )
+                dataset_id = (
+                    build_config.datasets[0].dataset_id if build_config.datasets else ''
+                )
+                atl_context_hash = bytes.fromhex(compute_context_hash(
+                    job_id=job_id_committed,
+                    commit_sha=commit_sha,
+                    archetype_id=archetype_id,
+                    dataset_id=dataset_id,
+                ))
+
+                # 4b.5 — Sign the JAC. The full payload stays with the
+                # coordinator; only its SHA-256 is logged via Commitment.
+                signed_jac = sign_jac(
+                    private_key=self._atl_client._private_key,
+                    job_id=job_id_committed,
+                    script_hash=script_hash,
+                    dataset_id=dataset_id,
+                    nonce=atl_nonce,
+                    t_accept=int(time.time()),
+                )
+
+                # 4b.6 — Submit Commitment and BLOCK on inclusion receipt.
+                # Non-Compliant jobs skip the log entry; the JAC is still
+                # signed and bound into user_data so the researcher has
+                # something to verify against if they re-enable ATL.
+                if not is_non_compliant:
+                    t0 = time.time()
+                    commitment_hash, commitment_receipt = self._atl_client.sign_and_submit_commitment(
+                        job_id=job_id_committed,
+                        jac_payload_bytes=signed_jac['payload'].encode(),
+                    )
+                    step_timing['commitment_submit_ms'] = round((time.time() - t0) * 1000, 2)
+
+                    if commitment_receipt is None:
+                        raise RuntimeError(
+                            "ATL Commitment submission failed; refusing to proceed "
+                            "(safety-over-availability). Job has not been dispatched."
+                        )
+
+                    self._log.info(
+                        job_id, "atl",
+                        f"JAC signed and Commitment logged: "
+                        f"job_id_committed={job_id_committed[:16]}... "
+                        f"tree_size={commitment_receipt.get('tree_size', '?')}",
+                    )
+
+            # State for post-execution result construction. Keyed by the
+            # operational job_id so the existing result-publish path is
+            # untouched — job_id_committed travels via this dict.
             self._active_jobs[job_id] = {
                 'atl_nonce': atl_nonce,
                 'atl_context_hash': atl_context_hash,
+                'signed_jac': signed_jac,
+                'commitment_receipt': commitment_receipt,
+                'commitment_hash': commitment_hash,
+                'job_id_committed': job_id_committed,
+                'researcher_nonce': researcher_nonce_hex,
+                'is_non_compliant': is_non_compliant,
             }
 
             # Step 5: Execute in enclave (branch on mode)
@@ -193,7 +306,8 @@ class SecureExecutor(IExecutor):
                 step_timing['proxy_detail'] = proxy_timing
                 t0 = time.time()
                 success, output, attestation, enclave_timing = self._step_execute_in_enclave(
-                    job_id, session_id, encrypted_zip, proxy_response.encrypted_csv
+                    job_id, session_id, encrypted_zip, proxy_response.encrypted_csv,
+                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
                 )
             elif middleware_response and middleware_response.is_direct_db:
                 # Validate SQL query before sending to enclave
@@ -201,12 +315,14 @@ class SecureExecutor(IExecutor):
                 success, output, attestation, enclave_timing = self._step_execute_in_enclave_db_fetch(
                     job_id, session_id, encrypted_zip,
                     middleware_response.encrypted_credentials,
-                    middleware_response.sql_query
+                    middleware_response.sql_query,
+                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
                 )
             else:
                 encrypted_csv = middleware_response.encrypted_csv if middleware_response else None
                 success, output, attestation, enclave_timing = self._step_execute_in_enclave(
-                    job_id, session_id, encrypted_zip, encrypted_csv
+                    job_id, session_id, encrypted_zip, encrypted_csv,
+                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
                 )
             step_timing['enclave_round_trip_ms'] = round((time.time() - t0) * 1000, 2)
             if enclave_timing:
@@ -448,14 +564,17 @@ class SecureExecutor(IExecutor):
 
     def _step_execute_in_enclave(
         self, job_id: str, session_id: str,
-        encrypted_zip: str, encrypted_csv: Optional[str]
+        encrypted_zip: str, encrypted_csv: Optional[str],
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
     ) -> tuple:
         """Step 5: Execute in enclave. Returns (success, output, attestation, enclave_timing)."""
         self._log.info(job_id, "enclave", "Sending to enclave for execution", progress=85)
 
         try:
             success, output, attestation = self._enclave_client.send_encrypted_data_to_enclave(
-                session_id, encrypted_zip, encrypted_csv
+                session_id, encrypted_zip, encrypted_csv,
+                atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
             )
             logger.info(f"Enclave execution completed: success={success}")
             # Extract enclave-internal timing if available
@@ -471,14 +590,17 @@ class SecureExecutor(IExecutor):
 
     def _step_execute_in_enclave_db_fetch(
         self, job_id: str, session_id: str,
-        encrypted_zip: str, encrypted_credentials: str, sql_query: str
+        encrypted_zip: str, encrypted_credentials: str, sql_query: str,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
     ) -> tuple:
         """Step 5 (direct_db): Execute in enclave with DB fetch. Returns (success, output, attestation, enclave_timing)."""
         self._log.info(job_id, "enclave", "Sending to enclave for DB fetch execution", progress=85)
 
         try:
             success, output, attestation = self._enclave_client.send_encrypted_data_with_db_fetch(
-                session_id, encrypted_zip, encrypted_credentials, sql_query
+                session_id, encrypted_zip, encrypted_credentials, sql_query,
+                atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
             )
             logger.info(f"Enclave DB fetch execution completed: success={success}")
             enclave_timing = None
@@ -498,6 +620,18 @@ class SecureExecutor(IExecutor):
     ) -> ExecutionResult:
         """Create execution result."""
         status = JobStatus.SUCCESS if success else JobStatus.FAILED
+
+        # Pull JAC / ATL artifacts stashed by Step 4b. Keyed by operational
+        # job_id so result construction doesn't need to know about
+        # job_id_committed. Missing keys are fine — pre-ATL jobs and
+        # ATL_ENABLED=false paths leave the dict empty.
+        job_state = self._active_jobs.get(job_id, {})
+        commitment_hash_bytes = job_state.get('commitment_hash')
+        commitment_hash_hex = (
+            commitment_hash_bytes.hex()
+            if isinstance(commitment_hash_bytes, bytes) else commitment_hash_bytes
+        )
+
         result = ExecutionResult(
             job_id=job_id,
             status=status,
@@ -507,7 +641,14 @@ class SecureExecutor(IExecutor):
             enclave_cid=getattr(self._enclave_client, 'enclave_cid', None),
             attestation=attestation,
             step_timing=step_timing,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
+            job_id_committed=job_state.get('job_id_committed'),
+            researcher_nonce=job_state.get('researcher_nonce'),
+            signed_jac=job_state.get('signed_jac'),
+            commitment_receipt=job_state.get('commitment_receipt'),
+            commitment_hash=commitment_hash_hex,
+            ha_receipt=job_state.get('ha_receipt'),
+            is_non_compliant=job_state.get('is_non_compliant', False),
         )
 
         if result.is_success:

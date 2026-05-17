@@ -115,9 +115,16 @@ class EnclaveClient(IEnclaveClient):
         self,
         session_id: str,
         encrypted_zip: str,
-        encrypted_csv: Optional[str] = None
+        encrypted_csv: Optional[str] = None,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
     ) -> Tuple[bool, str, Optional[Dict]]:
         """Send encrypted data to enclave for execution.
+
+        When atl_nonce / atl_context_hash are provided (commitment-then-dispatch
+        path), they travel in the request payload as hex strings so the enclave
+        can bind them into the hardware-signed user_data. Hex avoids the binary-
+        in-JSON problem on the VSock RPC.
 
         Returns:
             Tuple of (success, output, attestation_data)
@@ -133,6 +140,11 @@ class EnclaveClient(IEnclaveClient):
 
             if encrypted_csv:
                 request['encrypted_csv'] = encrypted_csv
+
+            if atl_nonce is not None:
+                request['atl_nonce'] = atl_nonce.hex()
+            if atl_context_hash is not None:
+                request['atl_context_hash'] = atl_context_hash.hex()
 
             response = self._send_to_enclave(request)
 
@@ -169,12 +181,18 @@ class EnclaveClient(IEnclaveClient):
         session_id: str,
         encrypted_zip: str,
         encrypted_credentials: str,
-        sql_query: str
+        sql_query: str,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
     ) -> Tuple[bool, str, Optional[Dict]]:
         """Send encrypted data to enclave for execution with direct DB fetch.
 
         The enclave will decrypt credentials, connect to the DB, fetch data,
         generate CSV internally, and execute the script.
+
+        When atl_nonce / atl_context_hash are provided (commitment-then-dispatch
+        path), they travel in the request payload as hex strings so the enclave
+        can bind them into the hardware-signed user_data.
 
         Returns:
             Tuple of (success, output, attestation_data)
@@ -189,6 +207,11 @@ class EnclaveClient(IEnclaveClient):
                 'encrypted_credentials': encrypted_credentials,
                 'sql_query': sql_query
             }
+
+            if atl_nonce is not None:
+                request['atl_nonce'] = atl_nonce.hex()
+            if atl_context_hash is not None:
+                request['atl_context_hash'] = atl_context_hash.hex()
 
             response = self._send_to_enclave(request)
 
