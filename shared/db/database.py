@@ -348,6 +348,8 @@ class JobRepository:
             'execution_metrics': job.execution_metrics,
             'enclave_version': job.enclave_version,
             'enclave_pcr0': job.enclave_pcr0,
+            'job_id_committed': job.job_id_committed,
+            'researcher_nonce': job.researcher_nonce,
             'created_at': job.created_at,
             'updated_at': job.updated_at,
             # Convenience properties
