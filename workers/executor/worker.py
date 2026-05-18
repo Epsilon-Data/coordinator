@@ -313,6 +313,7 @@ class ExecutorWorker(ExecutorWorkerBase):
                 job_id=job_id,
                 repo_path=repo_path,
                 workspace_id=job['workspace_id'],
+                researcher_nonce=job.get('researcher_nonce'),
                 ai_decision={
                     'commit_sha': job['commit_sha'],
                     'github_repo': job['github_repo'],
