@@ -25,6 +25,8 @@ from workers.executor.exceptions import ConfigurationError
 from workers.executor.factories import ExecutorFactory
 from workers.executor.atl_client import ATLClient
 from workers.executor.jac import sign_jac, compute_script_hash, compute_context_hash
+from workers.executor.constants import EnclaveBackend
+from workers.executor.tdx_verifier import verify_tdx_attestation
 
 
 def _atl_receipt_to_json(receipt: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -156,14 +158,18 @@ class ExecutorWorker(ExecutorWorkerBase):
     def _verify_attestation(self, job_id: str, attestation: Any, logger) -> Optional[str]:
         """Verify attestation document and return a JSON verification receipt."""
         try:
-            if verify_attestation is None:
-                raise ImportError("epsilon_verifier not installed")
-
-            # Extract base64 attestation document from the stored JSON
+            # Normalise to a dict and route to the backend-specific verifier.
             att_doc = attestation
             if isinstance(att_doc, str):
                 att_doc = json.loads(att_doc)
 
+            if self._is_tdx_attestation(att_doc):
+                return self._verify_tdx_attestation(job_id, att_doc, logger)
+
+            if verify_attestation is None:
+                raise ImportError("epsilon_verifier not installed")
+
+            # Extract base64 attestation document from the stored JSON
             b64_doc = ""
             if isinstance(att_doc, dict):
                 inner = att_doc.get("attestation", {})
@@ -209,6 +215,40 @@ class ExecutorWorker(ExecutorWorkerBase):
                 "valid": False,
                 "error": str(e),
             })
+
+    @staticmethod
+    def _is_tdx_attestation(att_doc: Any) -> bool:
+        """True when the attestation payload is an Intel TDX quote."""
+        if not isinstance(att_doc, dict):
+            return False
+        inner = att_doc.get("attestation", {})
+        return isinstance(inner, dict) and inner.get("backend") == EnclaveBackend.TDX
+
+    def _verify_tdx_attestation(self, job_id: str, att_doc: Dict[str, Any], logger) -> str:
+        """Verify a TDX attestation and return a JSON receipt (same shape as Nitro)."""
+        result = verify_tdx_attestation(att_doc)
+        if not result.valid and result.error:
+            logger.warning(f"[ATTESTATION-TDX] {job_id}: {result.error}")
+        measurements = result.measurements
+        return json.dumps({
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "valid": result.valid,
+            "checks": {
+                "syntax_valid": result.syntax_valid,
+                "certificate_chain_valid": result.certificate_chain_valid,
+                "signature_valid": result.signature_valid,
+                "pcr_verified": result.pcr_verified,
+                "output_verified": result.output_verified,
+            },
+            "pcrs": {
+                "pcr0": measurements.get("mrtd"),
+                "pcr1": measurements.get("rtmr0"),
+                "pcr2": measurements.get("rtmr1"),
+            },
+            "module_id": result.module_id,
+            "verifier_version": "tdx-1.0.0",
+            "error": result.error,
+        })
 
     def _submit_to_atl(
         self,

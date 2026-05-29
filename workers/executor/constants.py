@@ -12,6 +12,13 @@ class EnclaveOperations:
     GET_ATTESTATION = "get_attestation"
 
 
+class EnclaveBackend:
+    """Selectable TEE backend for the enclave client."""
+    NITRO = "nitro"   # AWS Nitro Enclave over VSock (NSM/COSE attestation)
+    TDX = "tdx"       # Intel TDX Confidential VM over TCP (TDX quote attestation)
+    LOCAL = "local"   # In-process client for development/testing
+
+
 class MiddlewareModes:
     """Middleware response / request modes."""
     LEGACY = "legacy"

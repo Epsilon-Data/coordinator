@@ -7,10 +7,27 @@ from typing import Optional
 from workers.executor.settings import Settings, get_settings
 from workers.executor.interfaces import IExecutor, IEnclaveClient, IMiddlewareClient
 from workers.executor.exceptions import ConfigurationError
-from workers.executor.clients import EnclaveClient, EnclaveClientLocal, MiddlewareClient, ProxyClient
+from workers.executor.clients import EnclaveClient, EnclaveClientLocal, EnclaveClientTDX, MiddlewareClient, ProxyClient
+from workers.executor.constants import EnclaveBackend
 from workers.executor.executor import SecureExecutor
 
 logger = logging.getLogger("epsilon.executor")
+
+# Registry: backend name -> enclave client implementation.
+_ENCLAVE_CLIENTS = {
+    EnclaveBackend.NITRO: EnclaveClient,
+    EnclaveBackend.TDX: EnclaveClientTDX,
+    EnclaveBackend.LOCAL: EnclaveClientLocal,
+}
+
+
+def _resolve_enclave_backend(enclave_settings) -> str:
+    """Resolve the backend: explicit ``backend``, else legacy ``use_local_client``, else Nitro."""
+    if enclave_settings.backend:
+        return enclave_settings.backend
+    if enclave_settings.use_local_client:
+        return EnclaveBackend.LOCAL
+    return EnclaveBackend.NITRO
 
 
 class EnclaveClientFactory:
@@ -32,18 +49,22 @@ class EnclaveClientFactory:
         if settings is None:
             settings = get_settings()
 
+        backend = _resolve_enclave_backend(settings.enclave)
         try:
-            if settings.enclave.use_local_client:
-                logger.info("Creating local enclave client for testing")
-                return EnclaveClientLocal()
-            else:
-                logger.info("Creating Nitro Enclave client")
-                return EnclaveClient()
+            client_cls = _ENCLAVE_CLIENTS[backend]
+        except KeyError:
+            raise ConfigurationError(
+                f"Unknown enclave backend {backend!r}; expected one of {sorted(_ENCLAVE_CLIENTS)}",
+                details={'backend': backend},
+            )
 
+        try:
+            logger.info(f"Creating enclave client for backend: {backend}")
+            return client_cls()
         except Exception as e:
             raise ConfigurationError(
                 f"Failed to create enclave client: {e}",
-                details={'use_local': settings.enclave.use_local_client}
+                details={'backend': backend},
             )
 
 
