@@ -4,7 +4,7 @@
 //
 // The coordinator's Python verifier shells out to this binary and then confirms
 // REPORTDATA == SHA-512(out-of-band proof JSON). Verification is self-hosted --
-// PCK collateral is fetched from Intel PCS; no third-party verification service
+// the embedded Intel root of trust is used; no third-party verification service
 // sits in the trust path.
 //
 // Build:  go mod tidy && go build -o tdverify .
@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-tdx-guest/abi"
 	pb "github.com/google/go-tdx-guest/proto/tdx"
 	"github.com/google/go-tdx-guest/verify"
+	"github.com/google/logger"
 )
 
 type verdict struct {
@@ -33,6 +34,10 @@ type verdict struct {
 }
 
 func main() {
+	// go-tdx-guest logs via github.com/google/logger; route it away from stdout
+	// so this binary's stdout stays pure JSON (its contract with the caller).
+	logger.Init("tdverify", false, false, io.Discard)
+
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		emit(verdict{Error: fmt.Sprintf("read stdin: %v", err)})
@@ -63,8 +68,8 @@ func main() {
 		}
 	}
 
-	// Cryptographically verify signature + PCK certificate chain. Collateral is
-	// pulled from Intel PCS; revocations are checked.
+	// Cryptographically verify signature + PCK certificate chain against the
+	// embedded Intel root of trust; revocations are checked.
 	opts := &verify.Options{GetCollateral: true, CheckRevocations: true}
 	if verr := verify.RawTdxQuote(raw, opts); verr != nil {
 		v.Error = fmt.Sprintf("verify quote: %v", verr)

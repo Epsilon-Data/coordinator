@@ -42,19 +42,25 @@ class TdxVerificationResult:
 
 
 def _run_tdverify(quote: bytes) -> Dict[str, Any]:
-    """Invoke the go-tdx-guest verify helper and return its JSON verdict."""
+    """Invoke the go-tdx-guest verify helper and return its JSON verdict.
+
+    The verdict is the JSON object on stdout; we slice from the first '{' to stay
+    robust against any leading log lines a dependency might emit on stdout.
+    """
     proc = subprocess.run(
         [TDVERIFY_BIN],
         input=quote,
         capture_output=True,
         timeout=TDVERIFY_TIMEOUT_SECONDS,
     )
-    if not proc.stdout:
+    out = proc.stdout.decode(errors="replace")
+    start = out.find("{")
+    if start == -1:
         raise RuntimeError(
-            f"tdverify produced no output (rc={proc.returncode}): "
-            f"{proc.stderr.decode(errors='replace')}"
+            f"tdverify emitted no JSON verdict (rc={proc.returncode}): "
+            f"{(out or proc.stderr.decode(errors='replace'))[:500]}"
         )
-    return json.loads(proc.stdout.decode())
+    return json.loads(out[start:])
 
 
 def verify_tdx_attestation(
