@@ -263,9 +263,16 @@ class EnclaveClient(IEnclaveClient):
             # sendall (300s timeout) on payloads larger than that limit.
             sock.sendall(struct.pack('!I', len(body)) + body)
 
-            # Chunked receive to handle large responses
+            # The enclave replies with the same 4-byte length-prefix framing it
+            # received, then closes the connection (one request per connection).
+            # _recv_all drains until close; strip the header before decoding.
             response_data = self._recv_all(sock)
-            response = json.loads(response_data.decode())
+            if len(response_data) < 4:
+                raise ConnectionError(
+                    f"enclave returned {len(response_data)} bytes; expected a length-prefixed response"
+                )
+            msg_len = struct.unpack('!I', response_data[:4])[0]
+            response = json.loads(response_data[4:4 + msg_len].decode())
 
             return response
 
