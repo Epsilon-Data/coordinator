@@ -256,7 +256,12 @@ class EnclaveClient(IEnclaveClient):
             sock.connect((self.enclave_cid, self._settings.enclave.vsock_port))
 
             request_json = json.dumps(request_data)
-            sock.sendall(request_json.encode())
+            body = request_json.encode()
+            # Length-prefix framing (4-byte big-endian, matches the enclave's
+            # _recv_exact path). Without it the enclave falls back to raw-JSON
+            # receive, which stops draining at MAX_REQUEST_SIZE and stalls
+            # sendall (300s timeout) on payloads larger than that limit.
+            sock.sendall(struct.pack('!I', len(body)) + body)
 
             # Chunked receive to handle large responses
             response_data = self._recv_all(sock)
