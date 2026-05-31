@@ -125,12 +125,13 @@ class TestCryptoService:
         encrypted = crypto_service.encrypt(data, public_key_pem)
         combined = base64.b64decode(encrypted)
 
-        # Structure: encrypted_key (256 bytes for 2048-bit RSA) + iv (16 bytes) + ciphertext
+        # Structure: encrypted_key (256 bytes for 2048-bit RSA) + nonce (12 bytes) + ciphertext‖tag
         rsa_key_bytes = 256  # 2048 / 8
-        iv_size = 16
+        nonce_size = 12
+        tag_size = 16  # GCM authentication tag
 
-        # Minimum size: encrypted_key + iv + at least 16 bytes (one AES block)
-        assert len(combined) >= rsa_key_bytes + iv_size + 16
+        # GCM ciphertext length == plaintext length; the appended tag adds 16 bytes
+        assert len(combined) == rsa_key_bytes + nonce_size + len(data) + tag_size
 
     def test_different_encryptions_produce_different_output(self, crypto_service):
         """Test that encrypting same data twice produces different output (due to random IV)."""

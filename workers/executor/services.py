@@ -16,6 +16,8 @@ from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 
 from workers.executor.models import BuildConfig, DatasetConfig
 from workers.executor.exceptions import BuildValidationError
@@ -25,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 # Encryption constants
 AES_KEY_SIZE = 32  # 256 bits
-IV_SIZE = 16  # 128 bits for AES-CBC
+IV_SIZE = 16  # 128 bits for AES-CBC (legacy)
+GCM_NONCE_SIZE = 12  # 96 bits, standard for AES-GCM
 RSA_KEY_SIZE = 2048
 RSA_PUBLIC_EXPONENT = 65537
 AES_BLOCK_SIZE = 128  # bits
@@ -259,7 +262,7 @@ class ZipService:
 # =============================================================================
 class CryptoService:
     """
-    Hybrid encryption service using AES-256-CBC for data and RSA-OAEP for key exchange.
+    Hybrid encryption service using AES-256-GCM (authenticated) for data and RSA-OAEP for key exchange.
     """
 
     def generate_keypair(self) -> Tuple[RSAPrivateKey, str]:
@@ -277,19 +280,19 @@ class CryptoService:
         return private_key, public_key_pem
 
     def encrypt(self, data: bytes, public_key_pem: str) -> str:
-        """Encrypt data using hybrid encryption (AES-256-CBC + RSA-OAEP)."""
+        """Encrypt data using authenticated hybrid encryption (AES-256-GCM + RSA-OAEP).
+
+        Output: base64(encrypted_key || nonce[12] || ciphertext‖tag). A fresh AES
+        key and nonce are generated per call, so the nonce is never reused under a
+        key. Format matches the enclave's decrypt_combined_hybrid_data().
+        """
         rsa_public_key = serialization.load_pem_public_key(public_key_pem.encode())
 
         aes_key = os.urandom(AES_KEY_SIZE)
-        iv = os.urandom(IV_SIZE)
+        nonce = os.urandom(GCM_NONCE_SIZE)
 
-        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
-        encryptor = cipher.encryptor()
-
-        padder = sym_padding.PKCS7(AES_BLOCK_SIZE).padder()
-        padded_data = padder.update(data) + padder.finalize()
-
-        ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+        # AES-256-GCM: the 16-byte authentication tag is appended to the ciphertext
+        ciphertext = AESGCM(aes_key).encrypt(nonce, data, None)
 
         encrypted_key = rsa_public_key.encrypt(
             aes_key,
@@ -300,23 +303,26 @@ class CryptoService:
             )
         )
 
-        combined = encrypted_key + iv + ciphertext
+        combined = encrypted_key + nonce + ciphertext
 
         logger.debug(
             f"Encrypted {len(data)} bytes -> {len(combined)} bytes "
-            f"(key: {len(encrypted_key)}, iv: {IV_SIZE}, data: {len(ciphertext)})"
+            f"(key: {len(encrypted_key)}, nonce: {GCM_NONCE_SIZE}, data+tag: {len(ciphertext)})"
         )
 
         return base64.b64encode(combined).decode('utf-8')
 
     def decrypt(self, encrypted_data: str, private_key: RSAPrivateKey) -> bytes:
-        """Decrypt data using hybrid decryption (RSA-OAEP + AES-256-CBC)."""
+        """Decrypt authenticated hybrid data (RSA-OAEP + AES-256-GCM).
+
+        The GCM tag is verified; tampered or corrupt input raises ValueError.
+        """
         combined = base64.b64decode(encrypted_data)
 
         rsa_key_bytes = private_key.key_size // 8
         encrypted_key = combined[:rsa_key_bytes]
-        iv = combined[rsa_key_bytes:rsa_key_bytes + IV_SIZE]
-        ciphertext = combined[rsa_key_bytes + IV_SIZE:]
+        nonce = combined[rsa_key_bytes:rsa_key_bytes + GCM_NONCE_SIZE]
+        ciphertext = combined[rsa_key_bytes + GCM_NONCE_SIZE:]  # includes 16-byte tag
 
         aes_key = private_key.decrypt(
             encrypted_key,
@@ -327,12 +333,10 @@ class CryptoService:
             )
         )
 
-        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
-        decryptor = cipher.decryptor()
-        padded_data = decryptor.update(ciphertext) + decryptor.finalize()
-
-        unpadder = sym_padding.PKCS7(AES_BLOCK_SIZE).unpadder()
-        data = unpadder.update(padded_data) + unpadder.finalize()
+        try:
+            data = AESGCM(aes_key).decrypt(nonce, ciphertext, None)
+        except InvalidTag as e:
+            raise ValueError("AES-GCM authentication failed: data tampered or corrupt") from e
 
         logger.debug(f"Decrypted {len(combined)} bytes -> {len(data)} bytes")
 
