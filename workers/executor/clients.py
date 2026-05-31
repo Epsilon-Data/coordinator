@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,7 @@ def _safe_int_env(name: str, default: int, min_val: int = 1, max_val: int = 3600
 # Network constants (configurable via env vars)
 VSOCK_TIMEOUT_SECONDS = _safe_int_env('VSOCK_TIMEOUT_SECONDS', 300, min_val=1, max_val=600)
 VSOCK_RECV_BUFFER_BYTES = 4 * 1024 * 1024
+TD_AGENT_TIMEOUT_SECONDS = _safe_int_env('TD_AGENT_TIMEOUT_SECONDS', 300, min_val=1, max_val=600)
 HEALTH_CHECK_TIMEOUT_SECONDS = _safe_int_env('HEALTH_CHECK_TIMEOUT_SECONDS', 5, min_val=1, max_val=60)
 HTTP_ERROR_THRESHOLD = 400
 HTTP_RETRY_STATUS_CODES = {502, 503, 504}
@@ -254,7 +256,12 @@ class EnclaveClient(IEnclaveClient):
             sock.connect((self.enclave_cid, self._settings.enclave.vsock_port))
 
             request_json = json.dumps(request_data)
-            sock.sendall(request_json.encode())
+            body = request_json.encode()
+            # Length-prefix framing (4-byte big-endian, matches the enclave's
+            # _recv_exact path). Without it the enclave falls back to raw-JSON
+            # receive, which stops draining at MAX_REQUEST_SIZE and stalls
+            # sendall (300s timeout) on payloads larger than that limit.
+            sock.sendall(struct.pack('!I', len(body)) + body)
 
             # Chunked receive to handle large responses
             response_data = self._recv_all(sock)
@@ -338,6 +345,175 @@ class EnclaveClient(IEnclaveClient):
     def disconnect(self) -> None:
         self._connected = False
         logger.info("Disconnected from enclave")
+
+
+# =============================================================================
+# Enclave Client TDX (Production - Intel TDX Confidential VM over TCP)
+# =============================================================================
+class EnclaveClientTDX(IEnclaveClient):
+    """Client for the Epsilon TDX enclave agent (TcpEnclaveServer).
+
+    A TDX Confidential VM is a whole trust domain, so there is no host<->enclave
+    VSock channel; the coordinator reaches the in-TD agent over TCP. The request
+    operations and the returned attestation dict are identical to the Nitro
+    client -- only the transport (AF_INET + 4-byte length-prefix framing, which
+    the agent's server speaks) and the attestation format (Intel TDX quote vs
+    Nitro NSM document) differ.
+    """
+
+    HEADER_SIZE = 4  # 4-byte big-endian length prefix (see server.EnclaveServer)
+    MAX_RESPONSE_SIZE = 100 * 1024 * 1024  # 100 MB
+
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None):
+        self._settings = get_settings()
+        self._crypto = CryptoService()
+        self._host = host or self._settings.enclave.td_host
+        self._port = port or self._settings.enclave.td_port
+        self._connected = False
+        logger.info(f"[TDX] Initialized agent client for tcp://{self._host}:{self._port}")
+
+    def get_public_key(self, job_id: str) -> Tuple[str, str]:
+        """Get a freshly generated public key from the TDX agent."""
+        request = {
+            'operation': EnclaveOperations.GENERATE_KEYPAIR,
+            'job_id': job_id,
+            'key_size': RSA_KEY_SIZE_BITS,
+        }
+        response = self._send_to_td(request)
+        if not response.get('success'):
+            raise EnclaveConnectionError(f"TDX agent keypair generation failed: {response.get('error')}")
+        return response['public_key'], response['session_id']
+
+    def encrypt_zip_data(self, zip_data: bytes, public_key: str) -> str:
+        """Hybrid-encrypt the bundle. Substrate-independent (identical to Nitro)."""
+        return self._crypto.encrypt(zip_data, public_key)
+
+    def send_encrypted_data_to_enclave(
+        self,
+        session_id: str,
+        encrypted_zip: str,
+        encrypted_csv: Optional[str] = None,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Send encrypted data to the TDX agent for execution.
+
+        Returns:
+            Tuple of (success, output/error, attestation_data).
+        """
+        request = {
+            'operation': EnclaveOperations.EXECUTE_SCRIPT,
+            'session_id': session_id,
+            'encrypted_data': encrypted_zip,
+        }
+        if encrypted_csv:
+            request['encrypted_csv'] = encrypted_csv
+        if atl_nonce is not None:
+            request['atl_nonce'] = atl_nonce.hex()
+        if atl_context_hash is not None:
+            request['atl_context_hash'] = atl_context_hash.hex()
+        return self._execute(request, session_id)
+
+    def send_encrypted_data_with_db_fetch(
+        self,
+        session_id: str,
+        encrypted_zip: str,
+        encrypted_credentials: str,
+        sql_query: str,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """Send encrypted data to the TDX agent for execution with direct DB fetch."""
+        request = {
+            'operation': EnclaveOperations.EXECUTE_DB_FETCH,
+            'session_id': session_id,
+            'encrypted_data': encrypted_zip,
+            'encrypted_credentials': encrypted_credentials,
+            'sql_query': sql_query,
+        }
+        if atl_nonce is not None:
+            request['atl_nonce'] = atl_nonce.hex()
+        if atl_context_hash is not None:
+            request['atl_context_hash'] = atl_context_hash.hex()
+        return self._execute(request, session_id)
+
+    def _execute(self, request: dict, session_id: str) -> Tuple[bool, str, Optional[Dict]]:
+        """Send an execution request and normalise the (success, output, attestation) triple."""
+        try:
+            logger.info(f"[TDX] Dispatching {request['operation']} (session: {session_id[:20]}...)")
+            response = self._send_to_td(request)
+            if not response.get('success'):
+                error_msg = response.get('error', 'Unknown error')
+                logger.error(f"[TDX] Execution failed: {error_msg}")
+                return False, error_msg, None
+
+            attestation = response.get('attestation')
+            enclave_timing = response.get('timing')
+            if enclave_timing and attestation is not None:
+                attestation['timing'] = enclave_timing
+            return True, response.get('output', ''), attestation
+        except Exception as e:
+            logger.error(f"[TDX] Failed to send request: {e}", exc_info=True)
+            return False, str(e), None
+
+    def health_check(self) -> bool:
+        try:
+            response = self._send_to_td({'operation': EnclaveOperations.HEALTH_CHECK})
+            return response.get('success', False)
+        except Exception:
+            return False
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def connect(self) -> None:
+        """Probe the agent endpoint and mark the client connected."""
+        try:
+            with socket.create_connection((self._host, self._port), timeout=HEALTH_CHECK_TIMEOUT_SECONDS):
+                pass
+            self._connected = True
+            logger.info(f"[TDX] Connected to agent tcp://{self._host}:{self._port}")
+        except Exception as e:
+            self._connected = False
+            raise EnclaveConnectionError(f"Failed to connect to TDX agent: {e}")
+
+    def disconnect(self) -> None:
+        self._connected = False
+        logger.info("[TDX] Disconnected from agent")
+
+    # ------------------------------------------------------------------
+    # Transport: TCP with 4-byte big-endian length-prefix framing
+    # ------------------------------------------------------------------
+
+    def _send_to_td(self, request_data: dict) -> dict:
+        """Send one length-prefixed JSON request and read the framed response."""
+        with socket.create_connection((self._host, self._port), timeout=TD_AGENT_TIMEOUT_SECONDS) as sock:
+            payload = json.dumps(request_data).encode('utf-8')
+            sock.sendall(struct.pack('!I', len(payload)) + payload)
+
+            header = self._recv_exact(sock, self.HEADER_SIZE)
+            if header is None:
+                raise EnclaveConnectionError("TDX agent closed connection before response header")
+            msg_len = struct.unpack('!I', header)[0]
+            if msg_len == 0 or msg_len > self.MAX_RESPONSE_SIZE:
+                raise EnclaveConnectionError(f"Invalid TDX agent response length: {msg_len}")
+
+            body = self._recv_exact(sock, msg_len)
+            if body is None:
+                raise EnclaveConnectionError("TDX agent closed connection mid-response")
+            return json.loads(body.decode('utf-8'))
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
+        """Receive exactly n bytes, or None if the peer closes early."""
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
 
 
 # =============================================================================

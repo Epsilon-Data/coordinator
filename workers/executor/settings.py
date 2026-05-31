@@ -44,6 +44,12 @@ class EnclaveConfig:
     # External enclave mode: enclave is managed separately (not launched by executor)
     use_external_enclave: bool = field(default_factory=lambda: os.getenv('USE_EXTERNAL_ENCLAVE', 'false').lower() in ('true', '1', 'yes'))
     external_enclave_cid: Optional[int] = field(default_factory=lambda: int(os.getenv('ENCLAVE_CID', '0')) if os.getenv('ENCLAVE_CID') else None)
+    # TEE backend: 'nitro' (default), 'tdx', or 'local'. When unset, the client
+    # factory resolves it from use_local_client for backwards compatibility.
+    backend: str = field(default_factory=lambda: os.getenv('ENCLAVE_BACKEND', '').strip().lower())
+    # Intel TDX agent endpoint (TcpEnclaveServer) for the 'tdx' backend.
+    td_host: str = field(default_factory=lambda: os.getenv('TD_HOST', '127.0.0.1'))
+    td_port: int = field(default_factory=lambda: int(os.getenv('TD_PORT', '5005')))
 
 
 @dataclass
