@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0](https://github.com/Epsilon-Data/coordinator/compare/v1.3.4...v1.4.0) (2026-05-31)
+
+
+### Features
+
+* add ATL (Attestation Transparency Log) integration ([a28dd6d](https://github.com/Epsilon-Data/coordinator/commit/a28dd6d7add5441d235fa7a161946434ccebe2e2))
+* add ATL (Attestation Transparency Log) integration ([a0c014c](https://github.com/Epsilon-Data/coordinator/commit/a0c014cde9d1bc55081b33a0a5d8faf2ec2a55e7))
+* add end-to-end TDX backend demo/smoke-test driver ([d45dfea](https://github.com/Epsilon-Data/coordinator/commit/d45dfea3b4d24e80457fdc2115fbd7fe658b65f7))
+* add Intel TDX enclave-client backend and self-hosted TDX quote verifier ([30dc87f](https://github.com/Epsilon-Data/coordinator/commit/30dc87f259687eeed1c2ac62d609ee0bed541aed))
+* **atl_client:** add Commitment entry submission methods ([8f2a41f](https://github.com/Epsilon-Data/coordinator/commit/8f2a41fc4921326ce88d4b739bca0c6d7cbfc7a6))
+* **bench:** end-to-end Table 5 measurement script (B6) ([b145023](https://github.com/Epsilon-Data/coordinator/commit/b145023695819e96773315e6d842d1152666d394))
+* commitment-then-dispatch protocol + JAC artifacts ([2cf6c9e](https://github.com/Epsilon-Data/coordinator/commit/2cf6c9e628f4415937b0abccaed63321a4f4ad70))
+* **crypto:** use AES-256-GCM with tag verification for hybrid payload ([26cd804](https://github.com/Epsilon-Data/coordinator/commit/26cd80458828fcea77d69e840480189523d588e9))
+* **crypto:** use AES-256-GCM with tag verification for hybrid payload ([c3f5d7b](https://github.com/Epsilon-Data/coordinator/commit/c3f5d7b27a7e437d060ac920009afafaecccbfc0))
+* **db:** add job_id_committed and researcher_nonce columns ([508cc80](https://github.com/Epsilon-Data/coordinator/commit/508cc80148bb9ff90c9af527fa95025eafcec395))
+* **db:** persist ATL inclusion receipts on job_requests ([df8b4be](https://github.com/Epsilon-Data/coordinator/commit/df8b4be0f9bb2d3647ed79c2f0ea23a10ed5e806))
+* **executor:** commitment-then-dispatch in Step 4b (sprint A3) ([27220f0](https://github.com/Epsilon-Data/coordinator/commit/27220f0ed3a00a4d4b8b83b4a38fcb9a9cba6b1e))
+* **executor:** decompose proxy fetch into sub-stage timings ([bf60d5e](https://github.com/Epsilon-Data/coordinator/commit/bf60d5ef127fd68fb8bd6f16c1b37c513275a300))
+* **executor:** decompose proxy fetch into sub-stage timings ([1830d75](https://github.com/Epsilon-Data/coordinator/commit/1830d75f93c2827afdcfbbdf6caed605897540e2))
+* **executor:** forward atl_nonce and atl_context_hash to enclave (C1, coord side) ([b865ba6](https://github.com/Epsilon-Data/coordinator/commit/b865ba641a7690c4904bc568939251396f74e97d))
+* **executor:** plumb JAC artifacts through ExecutionResult and worker (A5) ([69792a0](https://github.com/Epsilon-Data/coordinator/commit/69792a0cf0ea7e86128aee54580828dc547b7c44))
+* merge sprint commitment-then-dispatch into main ([665e458](https://github.com/Epsilon-Data/coordinator/commit/665e458e04bddee64e8de7ae8837e6a4102c4c04))
+
+
+### Bug Fixes
+
+* **deps:** add cbor2 and httpx to executor extras ([5245e17](https://github.com/Epsilon-Data/coordinator/commit/5245e1762a6a02abbfef1869eb7b044f81053b54))
+* **deps:** add cbor2 and httpx to executor extras ([27744cc](https://github.com/Epsilon-Data/coordinator/commit/27744cc358ad51910da1d1e598a94a6deeeb4653))
+* **executor:** length-prefix vsock requests to fix large-payload stall ([058e9d6](https://github.com/Epsilon-Data/coordinator/commit/058e9d6fc281c1a754f72c4d2a1a532fb7ad271f))
+* keep tdverify stdout pure JSON (silence go-tdx-guest logger; tolerant parse) ([7938427](https://github.com/Epsilon-Data/coordinator/commit/7938427564b73c05fb33b8185709a5c53b10d629))
+* pass researcher_nonce from DB to JobExecutionRequest ([2f6495f](https://github.com/Epsilon-Data/coordinator/commit/2f6495f4d2d3f56256128167b28eeadb721a93c9))
+* pass researcher_nonce from DB to JobExecutionRequest ([cda76d1](https://github.com/Epsilon-Data/coordinator/commit/cda76d19e36eb9c9b5ed30675b72dd6407f18041))
+* pin go-tdx-guest to v0.3.1 (v0.3.2 tag does not exist) ([84bb879](https://github.com/Epsilon-Data/coordinator/commit/84bb8794a548c2391add6e539e1afc0769377f0f))
+
+
+### Documentation
+
+* fix architecture diagram, data flow, encryption model, and LLM reference ([716d272](https://github.com/Epsilon-Data/coordinator/commit/716d272fae334083b077ed47875005a6723222f6))
+* fix overall pipeline diagram - AI agent runs in parallel ([81d836f](https://github.com/Epsilon-Data/coordinator/commit/81d836f110ef2923a9916f060d009c448d1d0ab9))
+
 ## [1.3.4](https://github.com/Epsilon-Data/coordinator/compare/v1.3.3...v1.3.4) (2026-03-30)
 
 
