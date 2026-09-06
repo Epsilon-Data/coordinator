@@ -26,7 +26,8 @@ source venv/bin/activate
 pip install -e ".[dev]"
 
 # Set up pre-commit hooks
-pre-commit install --hook-type commit-msg
+brew install gitleaks  # secret scanner used by the pre-commit hook
+pre-commit install --hook-type commit-msg --hook-type pre-commit  # commit format + gitleaks secret scan
 
 # Copy environment file
 cp .env.example .env
