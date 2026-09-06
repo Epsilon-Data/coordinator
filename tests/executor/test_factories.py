@@ -16,6 +16,7 @@ class TestEnclaveClientFactory:
         """Create mock settings for local client."""
         settings = MagicMock()
         settings.enclave = MagicMock()
+        settings.enclave.backend = None  # not set explicitly -> fall through to use_local_client
         settings.enclave.use_local_client = True
         return settings
 
@@ -24,6 +25,7 @@ class TestEnclaveClientFactory:
         """Create mock settings for Nitro client."""
         settings = MagicMock()
         settings.enclave = MagicMock()
+        settings.enclave.backend = None  # not set explicitly -> fall through to use_local_client
         settings.enclave.use_local_client = False
         return settings
 
@@ -64,6 +66,7 @@ class TestEnclaveClientFactory:
         """Test that default settings are used when none provided."""
         with patch('workers.executor.factories.get_settings') as mock_get_settings:
             mock_settings = MagicMock()
+            mock_settings.enclave.backend = None
             mock_settings.enclave.use_local_client = True
             mock_get_settings.return_value = mock_settings
 

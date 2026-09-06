@@ -13,12 +13,17 @@ from workers.executor.executor import SecureExecutor
 
 logger = logging.getLogger("epsilon.executor")
 
-# Registry: backend name -> enclave client implementation.
-_ENCLAVE_CLIENTS = {
-    EnclaveBackend.NITRO: EnclaveClient,
-    EnclaveBackend.TDX: EnclaveClientTDX,
-    EnclaveBackend.LOCAL: EnclaveClientLocal,
-}
+def _enclave_clients() -> dict:
+    """Registry: backend name -> enclave client implementation.
+
+    Resolved at call time (not import time) so the client classes can be
+    patched on this module in tests.
+    """
+    return {
+        EnclaveBackend.NITRO: EnclaveClient,
+        EnclaveBackend.TDX: EnclaveClientTDX,
+        EnclaveBackend.LOCAL: EnclaveClientLocal,
+    }
 
 
 def _resolve_enclave_backend(enclave_settings) -> str:
@@ -50,11 +55,12 @@ class EnclaveClientFactory:
             settings = get_settings()
 
         backend = _resolve_enclave_backend(settings.enclave)
+        clients = _enclave_clients()
         try:
-            client_cls = _ENCLAVE_CLIENTS[backend]
+            client_cls = clients[backend]
         except KeyError:
             raise ConfigurationError(
-                f"Unknown enclave backend {backend!r}; expected one of {sorted(_ENCLAVE_CLIENTS)}",
+                f"Unknown enclave backend {backend!r}; expected one of {sorted(clients)}",
                 details={'backend': backend},
             )
 
