@@ -5,7 +5,8 @@ fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
 import json
 import os
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
 from sqlalchemy import text
@@ -80,20 +81,104 @@ class ExecutorWorker(ExecutorWorkerBase):
         else:
             logger.info("[ATL] ATL integration disabled (ATL_ENABLED=false or not configured)")
 
-        # Check if executor is ready — wait instead of crashing
+        self._init_recovery_settings()
+
+        # Jobs are only claimed once the enclave answers (see fetch_jobs), so a
+        # worker that starts before the enclave simply waits.
         if not self._executor.is_ready:
-            logger.warning("Enclave not ready, will retry on each polling cycle")
+            logger.warning("Enclave not ready, jobs will not be claimed until it is")
 
         logger.info(f"ExecutorWorker initialized for worker {self._settings.worker_id} in polling mode")
 
         # Reset orphaned executing jobs back to cloned on boot
         self._recover_orphaned_jobs()
 
-        # Stamp boot_ready_at in boot_events table for boot time measurement
-        self._stamp_boot_ready()
+    def _init_recovery_settings(self) -> None:
+        """Readiness tracking and stale-job recovery configuration."""
+        script_timeout = self._settings.execution.script_timeout_seconds
+        # An 'executing' job untouched for this long is treated as orphaned.
+        # Must exceed the longest real execution, since updated_at is not
+        # refreshed while a job runs.
+        self._stale_after_seconds = int(os.getenv('STALE_EXECUTING_SECONDS', str(max(3600, script_timeout * 3))))
+        self._stale_sweep_interval = int(os.getenv('STALE_SWEEP_INTERVAL_SECONDS', '300'))
+        self._max_execution_attempts = int(os.getenv('MAX_EXECUTION_ATTEMPTS', '3'))
+        self._last_stale_sweep = 0.0
+        self._enclave_was_ready = False
+
+    def _health_check(self) -> None:
+        """Check database connectivity without claiming jobs.
+
+        The base implementation calls fetch_jobs(), which for the executor
+        claims 'cloned' jobs as 'executing' and would then discard them.
+        """
+        try:
+            with db.get_session() as session:
+                session.execute(text("SELECT 1"))
+        except Exception as e:
+            self.logger.error(f"{self.worker_name}: Health check failed: {e}")
+            raise
+
+    def fetch_jobs(self):
+        """Claim cloned jobs only while the enclave is reachable.
+
+        Claiming sets the job to 'executing'. Doing that while the enclave is
+        still booting orphans the job, because later cycles only look for
+        'cloned' jobs.
+        """
+        logger = get_logger(__name__)
+        self._maybe_recover_stale_jobs()
+
+        if not self._executor.is_ready:
+            if self._enclave_was_ready:
+                logger.warning("[ENCLAVE] Enclave became unavailable, not claiming jobs")
+            else:
+                logger.info("[ENCLAVE] Waiting for enclave, not claiming jobs")
+            self._enclave_was_ready = False
+            return []
+
+        if not self._enclave_was_ready:
+            logger.info("[ENCLAVE] Enclave ready")
+            self._enclave_was_ready = True
+            # Boot is complete when the enclave answers, not when this
+            # container starts.
+            self._stamp_boot_ready()
+
+        return super().fetch_jobs()
+
+    def _maybe_recover_stale_jobs(self) -> None:
+        """Run the stale 'executing' sweep at most once per sweep interval."""
+        now = time.monotonic()
+        if self._last_stale_sweep and now - self._last_stale_sweep < self._stale_sweep_interval:
+            return
+        self._last_stale_sweep = now
+        self._recover_stale_jobs()
+
+    def _requeue_or_fail(self, job, reason: str) -> str:
+        """Return an orphaned job to 'cloned', or fail it after too many attempts.
+
+        The attempt count is kept in execution_metrics so no schema change is
+        needed. Returns the new status.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            metrics = json.loads(job.execution_metrics) if job.execution_metrics else {}
+        except (json.JSONDecodeError, TypeError):
+            metrics = {}
+        attempts = int(metrics.get('execution_attempts', 0)) + 1
+        metrics['execution_attempts'] = attempts
+        job.execution_metrics = json.dumps(metrics)
+        job.updated_at = now
+
+        if attempts >= self._max_execution_attempts:
+            job.status = JobStatus.FAILED.value
+            job.error_message = f"{reason} (gave up after {attempts} attempts)"
+            job.completed_at = now
+        else:
+            job.status = 'cloned'
+        return job.status
 
     def _recover_orphaned_jobs(self) -> None:
-        """Reset jobs stuck in 'executing' back to 'cloned' on boot.
+        """Requeue every job left in 'executing' when this worker starts.
 
         Handles the case where the enclave goes offline mid-execution
         and jobs get orphaned in the 'executing' state.
@@ -107,13 +192,34 @@ class ExecutorWorker(ExecutorWorkerBase):
                     select(JobRequest).where(JobRequest.status == 'executing')
                 ).scalars().all()
                 for job in orphaned:
-                    job.status = 'cloned'
-                    job.updated_at = datetime.now(timezone.utc)
-                    logger.warning(f"[BOOT] Recovered orphaned job {job.job_id} → cloned")
+                    status = self._requeue_or_fail(job, "Execution interrupted by executor restart")
+                    logger.warning(f"[BOOT] Recovered orphaned job {job.job_id} → {status}")
                 if not orphaned:
                     logger.info("[BOOT] No orphaned jobs found")
         except Exception as e:
             logger.warning(f"[BOOT] Could not recover orphaned jobs: {e}")
+
+    def _recover_stale_jobs(self) -> None:
+        """Requeue jobs stuck in 'executing' longer than the stale threshold."""
+        logger = get_logger(__name__)
+        try:
+            from shared.db.models import JobRequest
+            from sqlalchemy import select
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._stale_after_seconds)
+            with db.get_session() as session:
+                stale = session.execute(
+                    select(JobRequest)
+                    .where(JobRequest.status == 'executing')
+                    .where(JobRequest.updated_at < cutoff)
+                    .with_for_update(skip_locked=True)
+                ).scalars().all()
+                for job in stale:
+                    status = self._requeue_or_fail(
+                        job, f"Execution made no progress for {self._stale_after_seconds}s"
+                    )
+                    logger.warning(f"[RECOVERY] Stale job {job.job_id} → {status}")
+        except Exception as e:
+            logger.warning(f"[RECOVERY] Could not recover stale jobs: {e}")
 
     def _stamp_boot_ready(self) -> None:
         """Update the most recent boot_events row with boot_ready_at timestamp."""
@@ -342,9 +448,11 @@ class ExecutorWorker(ExecutorWorkerBase):
 
             logger.info(f"[REPO] Found repository at {repo_path}")
 
-            # Step 2: Check enclave readiness before changing status
+            # Step 2: The job is already claimed; if the enclave went away since
+            # fetch_jobs checked it, hand the job back instead of orphaning it.
             if not self._executor.is_ready:
-                logger.warning(f"[JOB] Enclave not ready — skipping job {job_id}, will retry next cycle")
+                job_repository.update_job_status(job_id=job_id, status='cloned')
+                logger.warning(f"[JOB] Enclave not ready — released job {job_id} back to cloned")
                 return False
 
             # Step 3: Mark job as executing (claimed)
