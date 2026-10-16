@@ -265,8 +265,7 @@ class EnclaveClient(IEnclaveClient):
             # sendall (300s timeout) on payloads larger than that limit.
             sock.sendall(struct.pack('!I', len(body)) + body)
 
-            # Chunked receive to handle large responses
-            response_data = self._recv_all(sock)
+            response_data = self._recv_response(sock)
             response = json.loads(response_data.decode())
 
             return response
@@ -277,12 +276,46 @@ class EnclaveClient(IEnclaveClient):
         finally:
             sock.close()
 
+    HEADER_SIZE = 4  # 4-byte big-endian length prefix (see server.EnclaveServer)
     MAX_RESPONSE_SIZE = 100 * 1024 * 1024  # 100 MB
 
-    def _recv_all(self, sock: socket.socket) -> bytes:
-        """Receive complete response with chunked reading."""
-        chunks = []
-        total_size = 0
+    def _recv_response(self, sock: socket.socket) -> bytes:
+        """Receive the enclave's reply to a length-prefixed request.
+
+        The enclave answers it with a 4-byte big-endian length, then the JSON
+        (server.EnclaveServer._send_response). A reply starting with '{' is an
+        unframed legacy reply, read until the enclave closes the connection.
+        """
+        header = self._recv_exact(sock, self.HEADER_SIZE)
+        if header is None:
+            raise EnclaveConnectionError("Enclave closed connection before response header")
+        if header[:1] == b'{':
+            return self._recv_all(sock, initial=header)
+
+        msg_len = struct.unpack('!I', header)[0]
+        if msg_len == 0 or msg_len > self.MAX_RESPONSE_SIZE:
+            raise EnclaveConnectionError(f"Invalid enclave response length: {msg_len}")
+
+        body = self._recv_exact(sock, msg_len)
+        if body is None:
+            raise EnclaveConnectionError("Enclave closed connection mid-response")
+        return body
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
+        """Receive exactly n bytes in 64KB chunks, or None if the peer closes early."""
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(min(n - len(buf), 65536))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _recv_all(self, sock: socket.socket, initial: bytes = b'') -> bytes:
+        """Receive an unframed (legacy) response with chunked reading."""
+        chunks = [initial] if initial else []
+        total_size = len(initial)
         while True:
             try:
                 chunk = sock.recv(65536)  # 64KB chunks
