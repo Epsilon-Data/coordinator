@@ -581,9 +581,14 @@ class EnclaveClientLocal(IEnclaveClient):
         self,
         session_id: str,
         encrypted_zip: str,
-        encrypted_csv: Optional[str] = None
+        encrypted_csv: Optional[str] = None,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
     ) -> Tuple[bool, str, Optional[Dict]]:
         """Execute encrypted payloads with Zero Trust decryption.
+
+        atl_nonce / atl_context_hash are accepted for interface parity and
+        ignored: the local attestation is not bound to the ATL.
 
         Returns:
             Tuple of (success, output, attestation_data) - attestation is None for local mode
