@@ -195,7 +195,7 @@ datasets: []
         assert result.error == 'Script failed'
 
     def test_execute_middleware_fetch_error(self, secure_executor, sample_request, mock_middleware_client):
-        """Test handling of middleware fetch error."""
+        """A middleware fetch error comes after real data was requested: failed, to be held."""
         response = MagicMock()
         response.success = False
         response.error = 'Dataset not found'
@@ -205,11 +205,12 @@ datasets: []
 
         result = secure_executor.execute(sample_request)
 
-        assert result.status == 'rejected'
+        assert result.status == 'failed'
+        assert result.real_data_contact is True
         assert 'Dataset not found' in result.error
 
     def test_execute_middleware_empty_csv(self, secure_executor, sample_request, mock_middleware_client):
-        """Test handling of empty CSV from middleware."""
+        """An empty CSV from the middleware: failed after real data was requested."""
         response = MagicMock()
         response.success = True
         response.encrypted_csv = ''
@@ -221,7 +222,8 @@ datasets: []
 
         result = secure_executor.execute(sample_request)
 
-        assert result.status == 'rejected'
+        assert result.status == 'failed'
+        assert result.real_data_contact is True
         assert 'empty CSV' in result.error
 
     def test_execute_build_validation_error(self, secure_executor, mock_enclave_client):
@@ -235,6 +237,7 @@ datasets: []
         result = secure_executor.execute(request)
 
         assert result.status == 'rejected'
+        assert result.real_data_contact is False
         assert 'Build' in result.error or 'not found' in result.error.lower()
         # Enclave should not be called on validation error
         mock_enclave_client.get_public_key.assert_not_called()
@@ -246,6 +249,7 @@ datasets: []
         result = secure_executor.execute(sample_request)
 
         assert result.status == 'failed'
+        assert result.real_data_contact is False
         assert 'Enclave connection failed' in result.error
 
     def test_step_validate_build_success(self, secure_executor, temp_repo):
@@ -360,6 +364,7 @@ datasets: []
         )
 
         assert result.status == 'rejected'
+        assert result.real_data_contact is False
         assert 'Missing build.yml' in result.error
 
     def test_handle_execution_error(self, secure_executor):
@@ -371,6 +376,7 @@ datasets: []
         )
 
         assert result.status == 'failed'
+        assert result.real_data_contact is False
         assert 'Unexpected error' in result.error
 
     def test_prepare_environment(self, secure_executor, temp_repo):

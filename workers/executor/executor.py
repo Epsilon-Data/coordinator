@@ -29,10 +29,15 @@ from workers.executor.jac import (
 from workers.executor.models import JobExecutionRequest, ExecutionResult, BuildConfig, JobStatus
 from workers.executor.exceptions import BuildValidationError
 from workers.executor.services import BuildValidator, ZipService
-from workers.executor.utils import get_logger
+from workers.executor.utils import get_logger, held_text_digest
 from shared.job_logger import JobLogger
 
 logger = get_logger(__name__)
+
+# Logged in place of text that may carry real-data values (enclave output,
+# middleware or proxy errors), which is held for review instead.
+ENCLAVE_FAILURE_LOG_MESSAGE = "enclave returned failure; details held for review"
+HELD_ERROR_LOG_MESSAGE = "job failed after real data was requested; details held for review"
 
 # SQL validation constants
 MAX_SQL_QUERY_LENGTH = 10000
@@ -108,6 +113,7 @@ class SecureExecutor(IExecutor):
         start_time = time.time()
         job_id = request.job_id
         step_timing = {}
+        real_data_contact = False
 
         try:
             self._log.info(job_id, "execution", f"Starting execution for job {job_id}")
@@ -127,8 +133,10 @@ class SecureExecutor(IExecutor):
             mode = MiddlewareModes.DIRECT_DB if use_direct_db else MiddlewareModes.LEGACY
             # Note: proxy mode is determined by middleware response, not a feature flag
 
-            # Step 3: Fetch from middleware (mode-dependent)
+            # Step 3: Fetch from middleware (mode-dependent). From here on any
+            # failure text may carry real-data values, so it is held for review.
             t0 = time.time()
+            real_data_contact = True
             middleware_response = self._step_fetch_from_middleware(
                 job_id, request, build_config, public_key, mode
             )
@@ -335,10 +343,12 @@ class SecureExecutor(IExecutor):
             return self._create_result(job_id, success, output, execution_time, attestation, step_timing)
 
         except BuildValidationError as e:
+            if real_data_contact:
+                return self._handle_execution_error(job_id, e, start_time, real_data_contact=True)
             return self._handle_validation_error(job_id, e, start_time)
 
         except Exception as e:
-            return self._handle_execution_error(job_id, e, start_time)
+            return self._handle_execution_error(job_id, e, start_time, real_data_contact=real_data_contact)
 
         finally:
             # Clean up to prevent memory leak
@@ -418,7 +428,7 @@ class SecureExecutor(IExecutor):
                     raise BuildValidationError("Middleware returned proxy mode but no proxy_info")
                 self._log.info(
                     job_id, "middleware",
-                    f"Proxy mode: port={response.proxy_info.get('assigned_port')}, status={response.proxy_info.get('status')}",
+                    f"Proxy mode: port={response.proxy_info.get('assigned_port')}",
                     progress=40
                 )
             else:
@@ -435,7 +445,12 @@ class SecureExecutor(IExecutor):
         except BuildValidationError:
             raise
         except Exception as e:
-            self._log.error(job_id, "middleware", f"Failed to fetch from middleware: {e}", error=e)
+            # The middleware reads the real dataset, so its error text is held, never logged
+            logger.error(f"Job {job_id} middleware fetch failed: {type(e).__name__} ({held_text_digest(str(e))})")
+            self._log.error(
+                job_id, "middleware", f"Failed to fetch from middleware: {type(e).__name__}",
+                error=Exception(HELD_ERROR_LOG_MESSAGE),
+            )
             raise BuildValidationError(f"Failed to fetch from middleware: {e}")
 
     def _step_fetch_from_proxy(
@@ -472,7 +487,7 @@ class SecureExecutor(IExecutor):
                 else:
                     logger.warning(f"[PROXY] No attestation in response: {list(attestation_response.keys())}")
             except Exception as e:
-                logger.warning(f"[PROXY] Could not get attestation: {e}")
+                logger.warning(f"[PROXY] Could not get attestation: {type(e).__name__} ({held_text_digest(str(e))})")
             timings['get_attestation_ms'] = round((time.time() - t_attest) * 1000, 2)
 
             if not attestation_doc:
@@ -531,7 +546,10 @@ class SecureExecutor(IExecutor):
             return proxy_response, timings
 
         except Exception as e:
-            self._log.error(job_id, "proxy", f"Failed to fetch from proxy: {e}", error=e)
+            self._log.error(
+                job_id, "proxy", f"Failed to fetch from proxy: {type(e).__name__}",
+                error=Exception(HELD_ERROR_LOG_MESSAGE),
+            )
             raise
 
     def _step_zip_and_encrypt(self, job_id: str, repo_path: str, public_key: str) -> str:
@@ -585,7 +603,10 @@ class SecureExecutor(IExecutor):
                 logger.info(f"Attestation received: {attestation.get('attestation', {}).get('attestation_document_length', 0)} bytes")
             return success, output, attestation, enclave_timing
         except Exception as e:
-            self._log.error(job_id, "enclave", f"Enclave execution failed: {e}", error=e)
+            self._log.error(
+                job_id, "enclave", f"Enclave execution failed: {type(e).__name__}",
+                error=Exception(HELD_ERROR_LOG_MESSAGE),
+            )
             raise
 
     def _step_execute_in_enclave_db_fetch(
@@ -610,7 +631,10 @@ class SecureExecutor(IExecutor):
                 logger.info(f"Attestation received (db_fetch_inside_enclave)")
             return success, output, attestation, enclave_timing
         except Exception as e:
-            self._log.error(job_id, "enclave", f"Enclave DB fetch execution failed: {e}", error=e)
+            self._log.error(
+                job_id, "enclave", f"Enclave DB fetch execution failed: {type(e).__name__}",
+                error=Exception(HELD_ERROR_LOG_MESSAGE),
+            )
             raise
 
     def _create_result(
@@ -661,7 +685,7 @@ class SecureExecutor(IExecutor):
             self._log.error(
                 job_id, "failed",
                 f"Enclave returned failure after {execution_time:.2f}s",
-                error=Exception(output or "Unknown error")
+                error=Exception(ENCLAVE_FAILURE_LOG_MESSAGE)
             )
 
         logger.info(f"Job {job_id} completed: {result.status.value}")
@@ -681,15 +705,32 @@ class SecureExecutor(IExecutor):
             output=None,
             error=f"Build validation failed: {error}",
             enclave_cid=None,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
+            real_data_contact=False,
         )
 
-    def _handle_execution_error(self, job_id: str, error: Exception, start_time: float) -> ExecutionResult:
-        """Handle general execution errors."""
-        execution_time = time.time() - start_time
-        logger.error(f"Job {job_id} failed: {error}", exc_info=True)
+    def _handle_execution_error(
+        self, job_id: str, error: Exception, start_time: float, real_data_contact: bool = False
+    ) -> ExecutionResult:
+        """Handle general execution errors.
 
-        self._log.error(job_id, "execution", f"Job failed: {error}", error=error)
+        Once real data was requested (middleware, proxy or enclave) the error
+        text may carry real-data values: it is returned (the worker holds it
+        for review) but never logged.
+        """
+        execution_time = time.time() - start_time
+        if real_data_contact:
+            logger.error(
+                f"Job {job_id} failed after real data was requested: "
+                f"{type(error).__name__} ({held_text_digest(str(error))})"
+            )
+            self._log.error(
+                job_id, "execution", f"Job failed after real data was requested: {type(error).__name__}",
+                error=Exception(HELD_ERROR_LOG_MESSAGE),
+            )
+        else:
+            logger.error(f"Job {job_id} failed: {error}", exc_info=True)
+            self._log.error(job_id, "execution", f"Job failed: {error}", error=error)
 
         return ExecutionResult(
             job_id=job_id,
@@ -698,7 +739,8 @@ class SecureExecutor(IExecutor):
             output=None,
             error=str(error),
             enclave_cid=getattr(self._enclave_client, 'enclave_cid', None),
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
+            real_data_contact=real_data_contact,
         )
 
     def prepare_environment(self, request: JobExecutionRequest) -> Dict[str, Any]:

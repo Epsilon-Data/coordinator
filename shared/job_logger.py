@@ -152,7 +152,8 @@ class JobLogger:
                 error_details=error_details
             )
         except Exception as e:
-            log.exception(f"Failed to save log for job {entry.job_id}: {e}")
+            # No traceback: it would chain the exception being handled, which can carry real-data text
+            log.error(f"Failed to save log for job {entry.job_id}: {e}")
             return None
 
 # Step types for consistency

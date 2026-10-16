@@ -1,6 +1,7 @@
 """
 Utilities for executor worker: logging configuration.
 """
+import hashlib
 import logging
 import logging.handlers
 import sys
@@ -92,3 +93,13 @@ def get_logger(name: str) -> logging.Logger:
         short_name = name
 
     return logging.getLogger(f"epsilon.executor.{short_name}")
+
+
+def held_text_digest(text: Optional[str]) -> str:
+    """Describe text that must not be logged (enclave output or error text held for review).
+
+    The SHA-256 prefix matches job_outputs.content_sha256 when the same text is held.
+    """
+    text = "" if text is None else str(text)
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"len={len(text)} sha256={digest}"

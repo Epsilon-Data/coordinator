@@ -108,12 +108,17 @@ class BaseWorker(ABC):
         pass
 
     def _update_job_failed(self, job_id: str, error_message: str) -> None:
-        """Update job status to failed with error message."""
+        """Update job status to failed with error message.
+
+        Clone and AI-worker failures carry no real-data text (release not required).
+        The release guard refuses this once a job holds output or its release is final.
+        """
         try:
             job_repository.update_job_status(
                 job_id=job_id,
                 status="failed",
-                error_message=error_message
+                error_message=error_message,
+                release_status='not_required',
             )
             self._job_logger.error(job_id, "failed", f"Job failed: {error_message}")
             self.logger.error(f"{self.worker_name}: Job {job_id} marked as failed - {error_message}")

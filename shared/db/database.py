@@ -2,20 +2,81 @@
 SQLAlchemy 2.0 database implementation for Epsilon Coordinator
 Maintains backward compatibility with existing database.py interface
 """
+import hashlib
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 import json
 
-from sqlalchemy import create_engine, select, update, and_
+from sqlalchemy import create_engine, select, update, and_, text, func
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..config import config
-from .models import Base, JobRequest, Workspace, JobLog
+from .models import Base, JobRequest, Workspace, JobLog, JobOutput
 
 logger = logging.getLogger(__name__)
+
+# error_message shown while the error text of a real-data run is held for review.
+# Must stay byte-identical to HELD_ERROR_MESSAGE in ResearchWorkspace shared/schema.ts.
+HELD_ERROR_MESSAGE = "Execution failed. Error details are held until a reviewer approves their release."
+
+# Real-data output is only ever stored in job_outputs (complete_job_with_held_output),
+# never in job_requests.execution_output.
+EXECUTION_OUTPUT_FIELDS = ('ai_result_path', 'execution_result', 'execution_result_path', 'execution_output')
+
+# update_job_status keyword -> job_requests column
+FIELD_MAPPING = {
+    'repo_path': 'result_metadata',
+    'repo_metadata': 'logs',
+    'ai_confidence_score': 'validation_status',
+    'ai_reasoning': 'validation_decision',
+    'ai_risks': 'ai_logs',
+    'error_message': 'error_message',
+    'attestation': 'attestation',  # Enclave attestation document
+    'verification_receipt': 'verification_receipt',  # Server-side verification result
+    'execution_metrics': 'execution_metrics',  # Per-step timing metrics
+    'enclave_version': 'enclave_version',
+    'enclave_pcr0': 'enclave_pcr0'
+}
+
+
+def _reject_execution_output(fields: Dict[str, Any]) -> None:
+    passed = [key for key in EXECUTION_OUTPUT_FIELDS if key in fields]
+    if passed:
+        raise ValueError(
+            f"{', '.join(passed)} would write execution_output; "
+            "hold real-data output with complete_job_with_held_output instead"
+        )
+
+
+def _merge_execution_metrics(existing: Optional[str], new: Any) -> Optional[str]:
+    """Merge new metrics into the stored JSON object: existing keys kept, new keys win.
+
+    Keeps keys written by other workers (e.g. the AI worker's ai_decision). A stored
+    value that is not a JSON object is replaced.
+    """
+    if isinstance(new, str):
+        try:
+            parsed = json.loads(new)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            new = parsed
+    if new is None:
+        return existing
+    if not isinstance(new, dict):
+        return json.dumps(new) if isinstance(new, list) else str(new)
+
+    try:
+        merged = json.loads(existing) if existing else {}
+    except (json.JSONDecodeError, TypeError):
+        merged = {}
+    if not isinstance(merged, dict):
+        merged = {}
+    merged.update(new)
+    return json.dumps(merged)
 
 
 class Database:
@@ -30,6 +91,8 @@ class Database:
             pool_pre_ping=True,
             pool_timeout=30,
             connect_args={"connect_timeout": 10, "options": "-c statement_timeout=30000"},
+            # Bound values (e.g. held output) never appear in SQLAlchemy errors or logs
+            hide_parameters=True,
             echo=False  # Set to True for SQL debugging
         )
         self.SessionLocal = sessionmaker(
@@ -68,10 +131,15 @@ class JobRepository:
         status: str,
         **kwargs
     ) -> Dict[str, Any]:
-        """Update job status and additional fields"""
+        """Update job status and additional fields.
+
+        execution_metrics is merged into the stored JSON object; release_status
+        is set directly. Real-data output cannot be written here (ValueError).
+        """
+        _reject_execution_output(kwargs)
         with self.db.get_session() as session:
-            # Get the job first
-            job = session.get(JobRequest, job_id)
+            # Get the job first, row-locked so the metrics merge can't lose a concurrent write
+            job = session.get(JobRequest, job_id, with_for_update={'key_share': True})
             if not job:
                 raise ValueError(f"Job {job_id} not found")
 
@@ -83,35 +151,7 @@ class JobRepository:
             if status in ('success', 'failed', 'rejected'):
                 job.completed_at = datetime.now(timezone.utc)
 
-            # Handle additional fields with mapping to maintain compatibility
-            field_mapping = {
-                'repo_path': 'result_metadata',
-                'repo_metadata': 'logs',
-                'ai_confidence_score': 'validation_status',
-                'ai_reasoning': 'validation_decision',
-                'ai_risks': 'ai_logs',
-                'ai_result_path': 'execution_output',  # Use execution_output for AI result path
-                'execution_result': 'execution_output',
-                'execution_result_path': 'execution_output',  # Use execution_output for result paths
-                'error_message': 'error_message',
-                'attestation': 'attestation',  # Enclave attestation document
-                'verification_receipt': 'verification_receipt',  # Server-side verification result
-                'execution_metrics': 'execution_metrics',  # Per-step timing metrics
-                'enclave_version': 'enclave_version',
-                'enclave_pcr0': 'enclave_pcr0'
-            }
-
-            for key, value in kwargs.items():
-                if key in field_mapping:
-                    db_field = field_mapping[key]
-                    # Convert complex objects to string
-                    if isinstance(value, (dict, list)):
-                        setattr(job, db_field, json.dumps(value))
-                    else:
-                        setattr(job, db_field, str(value) if value is not None else None)
-                elif hasattr(job, key):
-                    # Direct field mapping
-                    setattr(job, key, value)
+            self._apply_job_fields(job, kwargs)
 
             session.flush()
             session.refresh(job)
@@ -120,6 +160,100 @@ class JobRepository:
 
             # Convert to dict for backward compatibility
             return self._job_to_dict(job)
+
+    def complete_job_with_held_output(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        kind: str,
+        content: str,
+        attested_output_hash: Optional[str] = None,
+        error_message: Optional[str] = None,
+        **fields
+    ) -> Dict[str, Any]:
+        """Finish a real-data run, holding its result or error text for review.
+
+        One transaction on the locked job row. The held output in job_outputs is
+        left alone once the release is decided, and a held result is never
+        replaced by an error; otherwise an undecided row is replaced. Writing a
+        result also sets error_message (normally clearing an earlier held message).
+        release_status becomes 'pending' unless it is final (released/withheld).
+        Other fields are applied as in update_job_status. execution_output is
+        never written.
+        """
+        if kind not in ('result', 'error'):
+            raise ValueError(f"Unknown held output kind: {kind}")
+        _reject_execution_output(fields)
+        for key in ('release_status', 'output_sha256'):
+            if key in fields:
+                raise ValueError(f"{key} is set by complete_job_with_held_output itself")
+        content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        with self.db.get_session() as session:
+            job = session.get(JobRequest, job_id, with_for_update=True)
+            if not job:
+                raise ValueError(f"Job {job_id} not found")
+
+            # A final status without a decision is a job released before the gate existed
+            decided = job.release_status in ('released', 'withheld') or session.execute(
+                text("SELECT 1 FROM release_decisions WHERE job_id = :job_id"), {'job_id': job_id}
+            ).first() is not None
+            held = session.get(JobOutput, job_id)
+
+            if decided:
+                logger.warning(f"Job {job_id} release already decided ({job.release_status}); held output left unchanged")
+            elif held is not None and held.kind == 'result' and kind == 'error':
+                logger.warning(f"Job {job_id} already holds a result; not replacing it with an error")
+            else:
+                if held is None:
+                    held = JobOutput(job_id=job_id)
+                    session.add(held)
+                else:
+                    held.created_at = func.now()
+                held.kind = kind
+                held.content = content
+                held.content_sha256 = content_sha256
+                held.attested_output_hash = attested_output_hash
+                if kind == 'result':
+                    job.output_sha256 = content_sha256
+                    # A held message from an earlier failed run must not linger next to the result
+                    job.error_message = error_message
+
+            now = datetime.now(timezone.utc)
+            job.status = status
+            job.updated_at = now
+            job.completed_at = now
+            # A held output must always be reviewable
+            if job.release_status not in ('released', 'withheld'):
+                job.release_status = 'pending'
+            if error_message is not None:
+                job.error_message = error_message
+
+            self._apply_job_fields(job, fields)
+
+            session.flush()
+            session.refresh(job)
+
+            logger.info(f"Completed job {job_id} with status {status}; {kind} output held for review")
+            return self._job_to_dict(job)
+
+    @staticmethod
+    def _apply_job_fields(job: JobRequest, fields: Dict[str, Any]) -> None:
+        """Set update_job_status keyword fields, with mapping to maintain compatibility"""
+        for key, value in fields.items():
+            if key == 'execution_metrics':
+                job.execution_metrics = _merge_execution_metrics(job.execution_metrics, value)
+            elif key in FIELD_MAPPING:
+                db_field = FIELD_MAPPING[key]
+                # Convert complex objects to string
+                if isinstance(value, (dict, list)):
+                    setattr(job, db_field, json.dumps(value))
+                else:
+                    setattr(job, db_field, str(value) if value is not None else None)
+            elif hasattr(job, key):
+                # Direct field mapping
+                setattr(job, key, value)
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get job by job_id"""
@@ -267,7 +401,7 @@ class JobRepository:
     ) -> None:
         """Store AI analysis results as metadata without changing job status."""
         with self.db.get_session() as session:
-            job = session.get(JobRequest, job_id)
+            job = session.get(JobRequest, job_id, with_for_update={'key_share': True})
             if not job:
                 raise ValueError(f"Job {job_id} not found")
 
@@ -280,8 +414,10 @@ class JobRepository:
             if ai_risks is not None:
                 job.ai_logs = json.dumps(ai_risks) if isinstance(ai_risks, list) else str(ai_risks)
             if ai_decision is not None:
-                # Store the AI decision (ai_approved/ai_rejected) in a metadata field
-                # This is informational only — does not affect execution flow
+                # The AI decision (ai_approved/ai_rejected) is advisory only — it does
+                # not affect execution or release. Also kept in execution_metrics for
+                # readers that predate the ai_decision column.
+                job.ai_decision = ai_decision
                 existing = job.execution_metrics
                 try:
                     metrics = json.loads(existing) if existing else {}
@@ -350,6 +486,9 @@ class JobRepository:
             'enclave_pcr0': job.enclave_pcr0,
             'job_id_committed': job.job_id_committed,
             'researcher_nonce': job.researcher_nonce,
+            'release_status': job.release_status,
+            'ai_decision': job.ai_decision,
+            'output_sha256': job.output_sha256,
             'created_at': job.created_at,
             'updated_at': job.updated_at,
             # Convenience properties

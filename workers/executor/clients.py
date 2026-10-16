@@ -33,6 +33,7 @@ from workers.executor.services import CryptoService
 from workers.executor.exceptions import EnclaveConnectionError
 from workers.executor.settings import get_settings, ProxyConfig
 from workers.executor.constants import EnclaveOperations, MiddlewareModes
+from workers.executor.utils import held_text_digest
 
 logger = logging.getLogger("epsilon.executor")
 
@@ -171,7 +172,8 @@ class EnclaveClient(IEnclaveClient):
                 return True, response.get('output', ''), attestation
             else:
                 error_msg = response.get('error', 'Unknown error')
-                logger.error(f"[ENCLAVE] Execution failed: {error_msg}")
+                # The enclave's error text may carry real-data output; it is held for review
+                logger.error(f"[ENCLAVE] Execution failed ({held_text_digest(error_msg)})")
                 return False, error_msg, None
 
         except Exception as e:
@@ -236,7 +238,7 @@ class EnclaveClient(IEnclaveClient):
                 return True, response.get('output', ''), attestation
             else:
                 error_msg = response.get('error', 'Unknown error')
-                logger.error(f"[ENCLAVE] DB fetch execution failed: {error_msg}")
+                logger.error(f"[ENCLAVE] DB fetch execution failed ({held_text_digest(error_msg)})")
                 return False, error_msg, None
 
         except Exception as e:
@@ -444,7 +446,7 @@ class EnclaveClientTDX(IEnclaveClient):
             response = self._send_to_td(request)
             if not response.get('success'):
                 error_msg = response.get('error', 'Unknown error')
-                logger.error(f"[TDX] Execution failed: {error_msg}")
+                logger.error(f"[TDX] Execution failed ({held_text_digest(error_msg)})")
                 return False, error_msg, None
 
             attestation = response.get('attestation')
@@ -888,7 +890,8 @@ class MiddlewareClient(IMiddlewareClient):
 
                 if response.status_code >= HTTP_ERROR_THRESHOLD:
                     logger.error(f"[MIDDLEWARE-ERROR] HTTP {response.status_code} received")
-                    logger.debug(f"[MIDDLEWARE-ERROR] Response body: {response.text[:500]}")
+                    # The middleware reads the real dataset: its error text may carry row values
+                    logger.debug(f"[MIDDLEWARE-ERROR] Response body ({held_text_digest(response.text)})")
 
                     # Parse error if JSON
                     try:
@@ -981,7 +984,7 @@ class MiddlewareClient(IMiddlewareClient):
                 time.sleep(delay)
 
             except Exception as e:
-                logger.error(f"[MIDDLEWARE] Unexpected error: {e}", exc_info=True)
+                logger.error(f"[MIDDLEWARE] Unexpected error: {type(e).__name__} ({held_text_digest(str(e))})")
                 return MiddlewareResponse(success=False, error=str(e))
 
         # All retries exhausted
@@ -1108,22 +1111,25 @@ class ProxyClient:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('error', error_msg)
-                    logger.error(f"[PROXY] Error response: {error_data}")
+                    # message is the data owner's database error, which may carry row values
+                    logger.error(
+                        f"[PROXY] Error response: HTTP {response.status_code} code={error_data.get('error')} "
+                        f"({held_text_digest(error_data.get('message'))})"
+                    )
                 except Exception:
-                    logger.error(f"[PROXY] Raw error response: {response.text[:500]}")
+                    logger.error(f"[PROXY] Raw error response ({held_text_digest(response.text)})")
                 raise RuntimeError(f"[PROXY] Query failed: {error_msg}")
 
             data = response.json()
 
             if not data.get('success', False):
-                logger.error(f"[PROXY] Query not successful: {data}")
+                logger.error(f"[PROXY] Query not successful: code={data.get('error')}")
                 raise RuntimeError(f"[PROXY] Query failed: {data.get('error', 'Unknown error')}")
 
             encrypted_csv = data.get('encrypted_csv', '')
             metadata = data.get('metadata', {})
 
-            logger.info(f"[PROXY] Success! Encrypted CSV: {len(encrypted_csv)} chars, "
-                        f"metadata: {metadata}")
+            logger.info(f"[PROXY] Success! Encrypted CSV: {len(encrypted_csv)} chars")
 
             return ProxyResponse(
                 encrypted_csv=encrypted_csv,

@@ -76,6 +76,13 @@ class JobRequest(Base):
     commitment_receipt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     ha_receipt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Output release gate (migration 7f3a9c2d1e4b). Real-data output is held in
+    # job_outputs; release_status is NULL until the job finishes, then
+    # pending / released / withheld / not_required.
+    release_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    ai_decision: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # Advisory only
+    output_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -141,6 +148,20 @@ class JobRequest(Base):
     def ai_reasoning(self, value: Optional[str]):
         """Set AI reasoning in validation_decision"""
         self.validation_decision = value
+
+
+class JobOutput(Base):
+    """Real-data output (result or error text) held until a reviewer decides on its release"""
+    __tablename__ = "job_outputs"
+
+    job_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("job_requests.job_id", ondelete="CASCADE"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)  # 'result' or 'error'
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)  # SHA-256 of the UTF-8 content
+    attested_output_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class JobLog(Base):
