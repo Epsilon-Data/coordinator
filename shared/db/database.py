@@ -11,7 +11,7 @@ import json
 
 from sqlalchemy import create_engine, select, update, and_, text, func
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from ..config import config
 from .models import Base, JobRequest, Workspace, JobLog, JobOutput
@@ -40,6 +40,10 @@ FIELD_MAPPING = {
     'enclave_version': 'enclave_version',
     'enclave_pcr0': 'enclave_pcr0'
 }
+
+
+class ProjectChangedError(Exception):
+    """The job already has a different project or archetype recorded (RG025)."""
 
 
 def _reject_execution_output(fields: Dict[str, Any]) -> None:
@@ -174,13 +178,14 @@ class JobRepository:
     ) -> Dict[str, Any]:
         """Finish a real-data run, holding its result or error text for review.
 
-        One transaction on the locked job row. The held output in job_outputs is
-        left alone once the release is decided, and a held result is never
-        replaced by an error; otherwise an undecided row is replaced. Writing a
-        result also sets error_message (normally clearing an earlier held message).
-        release_status becomes 'pending' unless it is final (released/withheld).
-        Other fields are applied as in update_job_status. execution_output is
-        never written.
+        One transaction on the locked job row. Once the release is decided the
+        new run is discarded: the held output, attestation, receipts, error_message
+        and output_sha256 stay as reviewed, and status follows the held output.
+        A held result is never replaced by an error; otherwise an undecided row
+        is replaced. Writing a result also sets error_message (normally clearing
+        an earlier held message). release_status becomes 'pending' unless it is
+        final (released/withheld). Other fields are applied as in
+        update_job_status. execution_output is never written.
         """
         if kind not in ('result', 'error'):
             raise ValueError(f"Unknown held output kind: {kind}")
@@ -202,7 +207,10 @@ class JobRepository:
             held = session.get(JobOutput, job_id)
 
             if decided:
-                logger.warning(f"Job {job_id} release already decided ({job.release_status}); held output left unchanged")
+                logger.warning(
+                    f"Job {job_id} release already decided ({job.release_status}); "
+                    "the new run is discarded and the reviewed output, attestation and receipts are kept"
+                )
             elif held is not None and held.kind == 'result' and kind == 'error':
                 logger.warning(f"Job {job_id} already holds a result; not replacing it with an error")
             else:
@@ -221,22 +229,56 @@ class JobRepository:
                     job.error_message = error_message
 
             now = datetime.now(timezone.utc)
-            job.status = status
             job.updated_at = now
             job.completed_at = now
-            # A held output must always be reviewable
-            if job.release_status not in ('released', 'withheld'):
-                job.release_status = 'pending'
-            if error_message is not None:
-                job.error_message = error_message
-
-            self._apply_job_fields(job, fields)
+            if decided:
+                # The status describes the output that was reviewed, not the discarded run
+                job.status = {'result': 'success', 'error': 'failed'}.get(held.kind, status) if held else status
+            else:
+                job.status = status
+                # A held output must always be reviewable
+                if job.release_status not in ('released', 'withheld'):
+                    job.release_status = 'pending'
+                if error_message is not None:
+                    job.error_message = error_message
+                self._apply_job_fields(job, fields)
 
             session.flush()
             session.refresh(job)
 
             logger.info(f"Completed job {job_id} with status {status}; {kind} output held for review")
             return self._job_to_dict(job)
+
+    def record_job_project(self, job_id: str, project_id: str, archetype_id: str) -> None:
+        """Record the job's platform project and archetype, before real data is requested.
+
+        Recording the same values again changes nothing. A recorded value cannot change:
+        the database refuses (RG025), raised here as ProjectChangedError.
+        """
+        try:
+            with self.db.get_session() as session:
+                job = session.get(JobRequest, job_id)
+                if not job:
+                    raise ValueError(f"Job {job_id} not found")
+                job.project_id = project_id
+                job.archetype_id = archetype_id
+                job.updated_at = datetime.now(timezone.utc)
+                session.flush()
+        except DBAPIError as e:
+            if getattr(e.orig, 'pgcode', None) == 'RG025':
+                raise ProjectChangedError(f"Job {job_id} already has another project or archetype recorded") from e
+            raise
+        logger.info(f"Recorded project {project_id} (archetype {archetype_id}) for job {job_id}")
+
+    def get_submitter_sub(self, job_id: str) -> Optional[str]:
+        """users.external_id of the job's submitter (their Keycloak sub), or None if the job or user is missing."""
+        with self.db.get_session() as session:
+            row = session.execute(
+                text("SELECT u.external_id FROM job_requests jr JOIN users u ON u.id = jr.user_id "
+                     "WHERE jr.job_id = :job_id"),
+                {'job_id': job_id},
+            ).first()
+            return row[0] if row else None
 
     @staticmethod
     def _apply_job_fields(job: JobRequest, fields: Dict[str, Any]) -> None:
@@ -489,6 +531,8 @@ class JobRepository:
             'release_status': job.release_status,
             'ai_decision': job.ai_decision,
             'output_sha256': job.output_sha256,
+            'project_id': job.project_id,
+            'archetype_id': job.archetype_id,
             'created_at': job.created_at,
             'updated_at': job.updated_at,
             # Convenience properties

@@ -12,9 +12,26 @@ from workers.executor.executor import SecureExecutor
 from workers.executor.models import JobExecutionRequest, ExecutionResult, BuildConfig, DatasetConfig, JobStatus
 from workers.executor.exceptions import BuildValidationError
 
+PROJECT_ID = 'eba92dec-17a1-4a47-816e-77087ceb9531'
+SUBMITTER_SUB = '5d0b0a8e-3c1f-4b7a-9e2d-6f4a1c8b2e90'
+
 
 class TestSecureExecutor:
     """Test cases for SecureExecutor class."""
+
+    @pytest.fixture(autouse=True)
+    def project_repo(self):
+        """Recording the job's project succeeds and its submitter has a Keycloak sub."""
+        with patch('workers.executor.executor.job_repository') as repo:
+            repo.get_submitter_sub.return_value = SUBMITTER_SUB
+            yield repo
+
+    @pytest.fixture
+    def mock_access_client(self):
+        """The Epsilon API approves the submitter for the project."""
+        client = MagicMock()
+        client.check_project_access.return_value = True
+        return client
 
     @pytest.fixture
     def mock_enclave_client(self):
@@ -70,12 +87,12 @@ class TestSecureExecutor:
         (build_path / 'generated').mkdir()
 
         # Create valid build.yml
-        build_yml = """
+        build_yml = f"""
 version: "1.0"
 analysis:
   script_file: main.py
 datasets:
-  - dataset_id: ds-001
+  - dataset_id: {PROJECT_ID}
     archetype_id: arch-001
 privacy:
   epsilon: 1.5
@@ -111,7 +128,8 @@ datasets: []
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.fixture
-    def secure_executor(self, mock_enclave_client, mock_settings, mock_middleware_client, mock_job_logger):
+    def secure_executor(self, mock_enclave_client, mock_settings, mock_middleware_client, mock_job_logger,
+                        mock_access_client):
         """Create SecureExecutor instance."""
         with patch('workers.executor.executor.ZipService') as MockZip:
             mock_zip = MagicMock()
@@ -126,7 +144,8 @@ datasets: []
             executor = SecureExecutor(
                 enclave_client=mock_enclave_client,
                 settings=mock_settings,
-                middleware_client=mock_middleware_client
+                middleware_client=mock_middleware_client,
+                access_client=mock_access_client
             )
             executor._zip_service = mock_zip
             return executor
@@ -155,9 +174,13 @@ datasets: []
                 assert executor._settings is mock_settings
                 assert executor._middleware_client is mock_middleware_client
 
-    def test_execute_success(self, secure_executor, sample_request, mock_enclave_client):
+    def test_execute_success(self, secure_executor, sample_request, mock_enclave_client, project_repo,
+                             mock_access_client):
         """Test successful job execution."""
         result = secure_executor.execute(sample_request)
+
+        project_repo.record_job_project.assert_called_once_with('JOB-123', PROJECT_ID, 'arch-001')
+        mock_access_client.check_project_access.assert_called_once_with(PROJECT_ID, SUBMITTER_SUB)
 
         assert result.status == 'success'
         assert result.job_id == 'JOB-123'
@@ -170,8 +193,11 @@ datasets: []
         mock_enclave_client.encrypt_zip_data.assert_called_once()
         mock_enclave_client.send_encrypted_data_to_enclave.assert_called_once()
 
-    def test_execute_no_datasets_skips_middleware(self, secure_executor, temp_repo_no_datasets, mock_middleware_client):
-        """Test execution without datasets skips middleware fetch."""
+    def test_execute_no_datasets_is_rejected_before_anything_is_contacted(
+        self, secure_executor, temp_repo_no_datasets, mock_middleware_client, mock_enclave_client, project_repo,
+        mock_access_client,
+    ):
+        """A build without a dataset cannot be routed to a project's reviewers: rejected at build validation."""
         request = JobExecutionRequest(
             job_id='JOB-NO-DATA',
             repo_path=temp_repo_no_datasets,
@@ -181,9 +207,13 @@ datasets: []
 
         result = secure_executor.execute(request)
 
-        assert result.status == 'success'
-        # Middleware should not be called when no datasets
+        assert result.status == 'rejected'
+        assert result.real_data_contact is False
+        assert 'exactly one dataset' in result.error
         mock_middleware_client.fetch_encrypted_csv.assert_not_called()
+        mock_enclave_client.get_public_key.assert_not_called()
+        project_repo.record_job_project.assert_not_called()
+        mock_access_client.check_project_access.assert_not_called()
 
     def test_execute_enclave_failure(self, secure_executor, sample_request, mock_enclave_client):
         """Test handling of enclave execution failure."""

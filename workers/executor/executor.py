@@ -2,7 +2,8 @@
 Secure executor with Zero Trust enclave integration.
 
 Flow:
-1. Validate build configuration
+1. Validate build configuration, record the job's project and check the
+   submitter's access to it (before anything below is contacted)
 2. Get public key from enclave
 3. Fetch encrypted CSV from middleware
 4. Package and encrypt build folder
@@ -27,9 +28,11 @@ from workers.executor.jac import (
     sign_jac,
 )
 from workers.executor.models import JobExecutionRequest, ExecutionResult, BuildConfig, JobStatus
-from workers.executor.exceptions import BuildValidationError
+from workers.executor.exceptions import BuildValidationError, ProjectAccessDeniedError, ProjectAccessError
 from workers.executor.services import BuildValidator, ZipService
-from workers.executor.utils import get_logger, held_text_digest
+from workers.executor.clients import EnclaveClientLocal
+from workers.executor.utils import canonical_uuid, get_logger, held_text_digest
+from shared.db import job_repository, ProjectChangedError
 from shared.job_logger import JobLogger
 
 logger = get_logger(__name__)
@@ -80,7 +83,8 @@ class SecureExecutor(IExecutor):
     Secure job executor implementing Zero Trust architecture.
 
     Execution Flow:
-        1. Validate build configuration (build.yml)
+        1. Validate build configuration (build.yml), record the job's project
+           and check that its submitter may analyse it
         2. Get public key from enclave
         3. Fetch encrypted CSV from middleware (if datasets configured)
         4. Zip and encrypt build folder with enclave's public key
@@ -96,15 +100,29 @@ class SecureExecutor(IExecutor):
         middleware_client: IMiddlewareClient,
         proxy_client=None,
         atl_client=None,
+        access_client=None,
     ):
         self._enclave_client = enclave_client
         self._settings = settings
         self._middleware_client = middleware_client
         self._proxy_client = proxy_client
         self._atl_client = atl_client
+        self._access_client = access_client
         self._zip_service = ZipService()
         self._log = JobLogger("ExecutorWorker")
         self._active_jobs: Dict[str, Dict[str, Any]] = {}
+
+        # PROJECT_ACCESS_CHECK=disabled is honoured only with the local enclave (development)
+        self._skip_access_check = False
+        if settings.project_access.check == 'disabled':
+            if isinstance(enclave_client, EnclaveClientLocal):
+                self._skip_access_check = True
+                logger.warning("Project access check disabled (PROJECT_ACCESS_CHECK=disabled, local enclave)")
+            else:
+                logger.warning(
+                    "PROJECT_ACCESS_CHECK=disabled ignored: it is honoured only when the resolved enclave backend "
+                    "is local (ENCLAVE_BACKEND=local, or ENCLAVE_BACKEND unset and USE_LOCAL_ENCLAVE=true)"
+                )
 
         logger.info(f"SecureExecutor initialized (proxy={'enabled' if proxy_client else 'disabled'})")
 
@@ -122,6 +140,12 @@ class SecureExecutor(IExecutor):
             t0 = time.time()
             build_config = self._step_validate_build(job_id, request.repo_path)
             step_timing['build_validation_ms'] = round((time.time() - t0) * 1000, 2)
+
+            # Step 1b: Record the job's project and check that its submitter may
+            # analyse it, before the enclave, the middleware or a proxy is contacted.
+            t0 = time.time()
+            self._step_check_project_access(job_id, build_config)
+            step_timing['project_access_ms'] = round((time.time() - t0) * 1000, 2)
 
             # Step 2: Get public key
             t0 = time.time()
@@ -347,6 +371,9 @@ class SecureExecutor(IExecutor):
                 return self._handle_execution_error(job_id, e, start_time, real_data_contact=True)
             return self._handle_validation_error(job_id, e, start_time)
 
+        except ProjectAccessDeniedError as e:
+            return self._handle_access_denied(job_id, e, start_time)
+
         except Exception as e:
             return self._handle_execution_error(job_id, e, start_time, real_data_contact=real_data_contact)
 
@@ -370,6 +397,63 @@ class SecureExecutor(IExecutor):
         )
 
         return config
+
+    def _step_check_project_access(self, job_id: str, build_config: BuildConfig) -> None:
+        """Step 1b: Record the job's project, then check that its submitter may analyse it.
+
+        Raises ProjectAccessDeniedError when the submitter may not (the job is rejected),
+        and ProjectAccessError when the project could not be recorded or no decision
+        could be obtained (the job fails and can be re-run).
+        """
+        dataset = build_config.datasets[0]
+        project_id = dataset.dataset_id
+        self._log.info(job_id, "access", f"Recording project {project_id}", progress=16)
+
+        try:
+            job_repository.record_job_project(job_id, project_id, dataset.archetype_id)
+        except ProjectChangedError as e:
+            raise ProjectAccessError(
+                f"This job's project changed: the job was first run with another project or archetype, and its "
+                f"build.yml now names project {project_id} (archetype {dataset.archetype_id}). A job's project "
+                "cannot change; submit a new job."
+            ) from e
+        except Exception as e:
+            raise ProjectAccessError(
+                f"The job's project {project_id} could not be recorded ({type(e).__name__}); run the job again."
+            ) from e
+
+        if self._skip_access_check:
+            self._log.warning(job_id, "access", "Project access check skipped (PROJECT_ACCESS_CHECK=disabled)")
+            return
+
+        try:
+            submitter_sub = canonical_uuid(job_repository.get_submitter_sub(job_id))
+        except Exception as e:
+            raise ProjectAccessError(
+                f"The job's submitter could not be read ({type(e).__name__}); run the job again."
+            ) from e
+        if submitter_sub is None:
+            raise ProjectAccessDeniedError(
+                "Your account is not linked to a platform identity; sign in to the Research Workspace again, "
+                "then run the job again."
+            )
+
+        try:
+            if self._access_client is None:
+                raise ProjectAccessError("the check is not configured")
+            approved = self._access_client.check_project_access(project_id, submitter_sub)
+        except ProjectAccessError as e:
+            # The reason names configuration and upstream answers: operators only, not the researcher
+            logger.warning(f"[ACCESS] job={job_id} project={project_id}: access could not be checked: {e}")
+            raise ProjectAccessError(
+                f"Access to project {project_id} could not be checked right now; run the job again later."
+            ) from e
+        if not approved:
+            raise ProjectAccessDeniedError(
+                f"You are not approved to analyse project {project_id}; request access and run the job again."
+            )
+
+        self._log.info(job_id, "access", f"Access to project {project_id} confirmed", progress=18)
 
     def _step_get_public_key(self, job_id: str) -> tuple:
         """Step 2: Get public key from enclave."""
@@ -426,6 +510,13 @@ class SecureExecutor(IExecutor):
             elif response.is_proxy:
                 if not response.proxy_info:
                     raise BuildValidationError("Middleware returned proxy mode but no proxy_info")
+                # The proxy may only be asked for the project recorded for this job
+                echoed = response.proxy_info.get('dataset_id') or response.proxy_info.get('datasetId')
+                if echoed and canonical_uuid(echoed) != dataset.dataset_id:
+                    raise BuildValidationError(
+                        f"Middleware returned proxy mode for a project other than {dataset.dataset_id}, "
+                        "the project recorded for this job; no data was requested from the proxy"
+                    )
                 self._log.info(
                     job_id, "middleware",
                     f"Proxy mode: port={response.proxy_info.get('assigned_port')}",
@@ -709,6 +800,24 @@ class SecureExecutor(IExecutor):
             real_data_contact=False,
         )
 
+    def _handle_access_denied(self, job_id: str, error: ProjectAccessDeniedError, start_time: float) -> ExecutionResult:
+        """Handle a refused project access check; nothing beyond the job's own record was touched."""
+        execution_time = time.time() - start_time
+        logger.warning(f"Job {job_id} rejected: {error}")
+
+        self._log.error(job_id, "access", f"Project access refused: {error}", error=error)
+
+        return ExecutionResult(
+            job_id=job_id,
+            status=JobStatus.REJECTED,
+            execution_time=execution_time,
+            output=None,
+            error=str(error),
+            enclave_cid=None,
+            timestamp=datetime.now(timezone.utc),
+            real_data_contact=False,
+        )
+
     def _handle_execution_error(
         self, job_id: str, error: Exception, start_time: float, real_data_contact: bool = False
     ) -> ExecutionResult:
@@ -729,8 +838,11 @@ class SecureExecutor(IExecutor):
                 error=Exception(HELD_ERROR_LOG_MESSAGE),
             )
         else:
-            logger.error(f"Job {job_id} failed: {error}", exc_info=True)
-            self._log.error(job_id, "execution", f"Job failed: {error}", error=error)
+            # An expected access-step failure needs no traceback on every job; its chained
+            # cause (configuration, upstream answers) stays out of the job's log
+            expected = isinstance(error, ProjectAccessError)
+            logger.error(f"Job {job_id} failed: {error}", exc_info=not expected)
+            self._log.error(job_id, "execution", f"Job failed: {error}", error=None if expected else error)
 
         return ExecutionResult(
             job_id=job_id,

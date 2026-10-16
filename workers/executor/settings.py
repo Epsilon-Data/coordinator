@@ -99,6 +99,22 @@ class ProxyConfig:
 
 
 @dataclass
+class ProjectAccessConfig:
+    """Epsilon API used to check, before real data is requested, that a job's submitter may analyse its project."""
+    # Base URL including the API's global prefix (its API_BASE_URL, default /api/v1/hub),
+    # e.g. https://app.epsilon-data.org/api/v1/hub
+    api_url: str = field(default_factory=lambda: os.getenv('EPSILON_API_URL', '').strip().rstrip('/'))
+    client_id: str = field(default_factory=lambda: os.getenv('EPSILON_COORDINATOR_CLIENT_ID', 'coordinator-client'))
+    client_secret: str = field(default_factory=lambda: os.getenv('EPSILON_COORDINATOR_CLIENT_SECRET', ''), repr=False)
+    # 'enforce' (default) or 'disabled'; 'disabled' is honoured only when the resolved enclave backend is local
+    check: str = field(default_factory=lambda: os.getenv('PROJECT_ACCESS_CHECK', 'enforce').strip().lower())
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_url and self.client_id and self.client_secret)
+
+
+@dataclass
 class ExecutionConfig:
     """Execution-specific configuration."""
     script_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('SCRIPT_TIMEOUT', '300')))
@@ -149,6 +165,7 @@ class Settings:
     middleware: MiddlewareConfig = field(default_factory=MiddlewareConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     atl: ATLConfig = field(default_factory=ATLConfig)
+    project_access: ProjectAccessConfig = field(default_factory=ProjectAccessConfig)
 
     worker_id: str = field(default_factory=lambda: os.getenv('WORKER_ID', 'executor-001'))
     environment: str = field(default_factory=lambda: os.getenv('ENVIRONMENT', 'development'))

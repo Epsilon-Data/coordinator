@@ -66,6 +66,18 @@ def _platform_failure_fields(job: Dict[str, Any], error_message: Optional[str]) 
     return {}
 
 
+def _attested_input_hashes(checks: Dict[str, Any], dataset_hash: Any, context_hash: Any) -> Dict[str, Optional[str]]:
+    """dataset_hash and context_hash for the verification receipt, kept only from an authentic attestation.
+
+    context_hash covers the job's project id (jac.compute_context_hash) when ATL is on.
+    """
+    authentic = all(checks.get(name) is True for name in AUTHENTICITY_CHECKS)
+    return {
+        "dataset_hash": dataset_hash if authentic and isinstance(dataset_hash, str) and dataset_hash else None,
+        "context_hash": context_hash if authentic and isinstance(context_hash, str) and context_hash else None,
+    }
+
+
 def _attested_output_hash(verification_receipt: Optional[str]) -> Optional[str]:
     """Output hash bound into the attestation, read from the verification receipt (lower-case hex).
 
@@ -316,7 +328,7 @@ class ExecutorWorker(ExecutorWorkerBase):
                 att_doc = json.loads(att_doc)
 
             if self._is_tdx_attestation(att_doc):
-                return self._verify_tdx_attestation(job_id, att_doc, logger)
+                return self._verify_tdx_attestation(job_id, att_doc, logger, expected_output=expected_output)
 
             if verify_attestation is None:
                 raise ImportError("epsilon_verifier not installed")
@@ -347,18 +359,21 @@ class ExecutorWorker(ExecutorWorkerBase):
                 allow_expired=skip_cert,
             )
 
+            checks = {
+                "syntax_valid": vr.syntax_valid,
+                "certificate_chain_valid": vr.certificate_chain_valid,
+                "signature_valid": vr.aws_signature_valid,
+                "pcr_verified": vr.pcr_verified,
+                "output_verified": vr.output_verified,
+            }
+            user_data = vr.user_data if isinstance(vr.user_data, dict) else {}
             return json.dumps({
                 "verified_at": datetime.now(timezone.utc).isoformat(),
                 "valid": vr.valid,
-                "checks": {
-                    "syntax_valid": vr.syntax_valid,
-                    "certificate_chain_valid": vr.certificate_chain_valid,
-                    "signature_valid": vr.aws_signature_valid,
-                    "pcr_verified": vr.pcr_verified,
-                    "output_verified": vr.output_verified,
-                },
+                "checks": checks,
                 "pcrs": {"pcr0": vr.pcr0, "pcr1": vr.pcr1, "pcr2": vr.pcr2},
                 "output_hash": vr.output_hash,
+                **_attested_input_hashes(checks, user_data.get("dataset_hash"), user_data.get("context_hash")),
                 "module_id": vr.module_id,
                 "timestamp": vr.timestamp.isoformat() if vr.timestamp else None,
                 "verifier_version": "1.0.0",
@@ -382,29 +397,32 @@ class ExecutorWorker(ExecutorWorkerBase):
         inner = att_doc.get("attestation", {})
         return isinstance(inner, dict) and inner.get("backend") == EnclaveBackend.TDX
 
-    def _verify_tdx_attestation(self, job_id: str, att_doc: Dict[str, Any], logger) -> str:
+    def _verify_tdx_attestation(
+        self, job_id: str, att_doc: Dict[str, Any], logger, expected_output: Optional[str] = None
+    ) -> str:
         """Verify a TDX attestation and return a JSON receipt (same shape as Nitro)."""
-        result = verify_tdx_attestation(att_doc)
+        result = verify_tdx_attestation(att_doc, expected_output=expected_output)
         if not result.valid and result.error:
             logger.warning(f"[ATTESTATION-TDX] {job_id}: {result.error}")
         measurements = result.measurements
+        checks = {
+            "syntax_valid": result.syntax_valid,
+            "certificate_chain_valid": result.certificate_chain_valid,
+            "signature_valid": result.signature_valid,
+            "pcr_verified": result.pcr_verified,
+            "output_verified": result.output_verified,
+        }
         return json.dumps({
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "valid": result.valid,
-            "checks": {
-                "syntax_valid": result.syntax_valid,
-                "certificate_chain_valid": result.certificate_chain_valid,
-                "signature_valid": result.signature_valid,
-                "pcr_verified": result.pcr_verified,
-                "output_verified": result.output_verified,
-            },
+            "checks": checks,
             "pcrs": {
                 "pcr0": measurements.get("mrtd"),
                 "pcr1": measurements.get("rtmr0"),
                 "pcr2": measurements.get("rtmr1"),
             },
-            # TdxVerificationResult does not expose the attested output hash
-            "output_hash": None,
+            "output_hash": result.output_hash,
+            **_attested_input_hashes(checks, result.dataset_hash, result.context_hash),
             "module_id": result.module_id,
             "verifier_version": "tdx-1.0.0",
             "error": result.error,

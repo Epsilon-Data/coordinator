@@ -18,6 +18,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from workers.executor.executor import SecureExecutor
 from workers.executor.models import JobExecutionRequest
 
+PROJECT_ID = 'eba92dec-17a1-4a47-816e-77087ceb9531'
+
+
+@pytest.fixture(autouse=True)
+def project_repo():
+    """Recording the job's project succeeds and its submitter has a Keycloak sub."""
+    with patch('workers.executor.executor.job_repository') as repo:
+        repo.get_submitter_sub.return_value = '5d0b0a8e-3c1f-4b7a-9e2d-6f4a1c8b2e90'
+        yield repo
+
 
 @pytest.fixture
 def mock_enclave_client():
@@ -85,7 +95,7 @@ def temp_repo():
         'analysis:\n'
         '  script_file: main.py\n'
         'datasets:\n'
-        '  - dataset_id: ds-001\n'
+        f'  - dataset_id: {PROJECT_ID}\n'
         '    archetype_id: arch-001\n'
         'privacy:\n'
         '  epsilon: 1.5\n'
@@ -110,6 +120,7 @@ def executor_with_atl(mock_enclave_client, mock_settings, mock_middleware_client
             settings=mock_settings,
             middleware_client=mock_middleware_client,
             atl_client=mock_atl_client,
+            access_client=MagicMock(**{'check_project_access.return_value': True}),
         )
         ex._zip_service = zip_mock
         return ex

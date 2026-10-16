@@ -1,4 +1,4 @@
-"""Output-release gate against a real Postgres: migration 7f3a9c2d1e4b and JobRepository.
+"""Output-release gate against a real Postgres: migrations 7f3a9c2d1e4b and c5e2a8d4b7f1, and JobRepository.
 
 Needs TEST_DATABASE_URL, an admin URL of a throwaway server (for example
 postgresql://postgres@localhost:55432/postgres). Each run creates and drops its
@@ -21,7 +21,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from shared.base_worker import BaseWorker
-from shared.db import Database, JobRepository, HELD_ERROR_MESSAGE
+from shared.db import Database, JobRepository, HELD_ERROR_MESSAGE, ProjectChangedError
 
 TEST_DATABASE_URL = os.environ.get('TEST_DATABASE_URL')
 MARKER = 'MARKER-rg-db-patient-42-row-value'
@@ -36,18 +36,36 @@ ROOT = Path(__file__).resolve().parents[2]
 BASE_SCHEMA = ROOT / 'tests' / 'fixtures' / 'release_gate_base_schema.sql'
 BASE_REVISION = '2e1ea7116ba4'
 GATE_REVISION = '7f3a9c2d1e4b'
+HEAD_REVISION = 'c5e2a8d4b7f1'
 
 ALICE = '00000000-0000-0000-0000-0000000000a1'
-BOB = '00000000-0000-0000-0000-0000000000b2'  # reviewer
+BOB = '00000000-0000-0000-0000-0000000000b2'  # reviewer of PROJECT
+CAROL = '00000000-0000-0000-0000-0000000000c3'  # staff
+DAVE = '00000000-0000-0000-0000-0000000000d4'  # reviewer, approval pending
+ERIN = '00000000-0000-0000-0000-0000000000e5'  # reviewer, approval rejected
+FRANK = '00000000-0000-0000-0000-0000000000f6'  # researcher
+GRACE = '00000000-0000-0000-0000-0000000000a7'  # reviewer, assignments set per test
 WS_ALICE = '00000000-0000-0000-0000-00000000aaaa'
 WS_BOB = '00000000-0000-0000-0000-00000000bbbb'
+ALICE_SUB = '3f6c1a52-8e0d-4b6a-9c7e-2d4f8a1b5e93'
+
+PROJECT = 'eba92dec-17a1-4a47-816e-77087ceb9531'
+OTHER_PROJECT = 'a7702e2d-69dd-4543-b3b6-a6df21d287c9'
+ARCHETYPE = 'KYZ0RWPE6zwE'
+
+INSERT_DECISION = ('INSERT INTO release_decisions (job_id, decision, output_sha256, reviewer_id, reason) '
+                   'VALUES (:job_id, :decision, :sha, :reviewer, :reason)')
 
 # Jobs as they exist before the gate: three finished, three in flight.
 LEGACY_SEED = """
-INSERT INTO users (id, external_id, username, email, role) VALUES
- ('00000000-0000-0000-0000-0000000000a1','ext-a','alice','a@x','user'),
- ('00000000-0000-0000-0000-0000000000b2','ext-b','bob','b@x','reviewer'),
- ('00000000-0000-0000-0000-0000000000c3','ext-c','carol','c@x','staff');
+INSERT INTO users (id, external_id, username, email, role, approval_status) VALUES
+ ('00000000-0000-0000-0000-0000000000a1','3f6c1a52-8e0d-4b6a-9c7e-2d4f8a1b5e93','alice','a@x','user','approved'),
+ ('00000000-0000-0000-0000-0000000000b2','ext-b','bob','b@x','reviewer','approved'),
+ ('00000000-0000-0000-0000-0000000000c3','ext-c','carol','c@x','staff','approved'),
+ ('00000000-0000-0000-0000-0000000000d4','ext-d','dave','d@x','reviewer','pending'),
+ ('00000000-0000-0000-0000-0000000000e5','ext-e','erin','e@x','reviewer','rejected'),
+ ('00000000-0000-0000-0000-0000000000f6','ext-f','frank','f@x','user','approved'),
+ ('00000000-0000-0000-0000-0000000000a7','ext-g','grace','g@x','reviewer','approved');
 INSERT INTO workspaces (id, name, user_id, github_repo, github_branch) VALUES
  ('00000000-0000-0000-0000-00000000aaaa','ws-alice','00000000-0000-0000-0000-0000000000a1','alice/r','main'),
  ('00000000-0000-0000-0000-00000000bbbb','ws-bob','00000000-0000-0000-0000-0000000000b2','bob/r','main');
@@ -112,6 +130,13 @@ def gate_db():
     with _fresh_database() as url:
         _alembic(url, command.stamp, BASE_REVISION)
         _alembic(url, command.upgrade, 'head')
+        # What ResearchWorkspace mirrors from Keycloak: bob reviews PROJECT
+        conn = psycopg2.connect(_libpq_url(url))
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute('INSERT INTO reviewer_projects (user_id, project_id) VALUES (%s, %s)', (BOB, PROJECT))
+        finally:
+            conn.close()
         yield url
 
 
@@ -144,7 +169,7 @@ def _held(engine, job_id):
 
 def _new_job(engine, job_id, user_id=ALICE, workspace_id=WS_ALICE, status='executing', **columns):
     values = {'job_id': job_id, 'workspace_id': workspace_id, 'user_id': user_id,
-              'commit_sha': 'c0ffee', 'status': status, **columns}
+              'commit_sha': 'c0ffee', 'status': status, 'project_id': PROJECT, 'archetype_id': ARCHETYPE, **columns}
     with engine.begin() as conn:
         conn.execute(
             text(f"INSERT INTO job_requests ({', '.join(values)}) VALUES ({', '.join(':' + k for k in values)})"),
@@ -153,9 +178,28 @@ def _new_job(engine, job_id, user_id=ALICE, workspace_id=WS_ALICE, status='execu
     return job_id
 
 
+def _assign(engine, reviewer_id, project_id, minutes_ago=0):
+    """Mirror a Keycloak reviewer group membership, confirmed minutes_ago."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO reviewer_projects (user_id, project_id, synced_at) "
+                 "VALUES (:user_id, :project_id, now() - make_interval(mins => :minutes)) "
+                 "ON CONFLICT (user_id, project_id) DO UPDATE SET synced_at = EXCLUDED.synced_at"),
+            {'user_id': reviewer_id, 'project_id': project_id, 'minutes': minutes_ago},
+        )
+
+
+def _unassign_all(engine, reviewer_id):
+    with engine.begin() as conn:
+        conn.execute(text('DELETE FROM reviewer_projects WHERE user_id = :user_id'), {'user_id': reviewer_id})
+
+
 def _decide(engine, job_id, decision, reviewer_id=BOB, reason=None):
-    """What ResearchWorkspace does: the decision and the release status in one transaction."""
+    """What ResearchWorkspace does: confirm the reviewer's projects, then the decision and the release status."""
     output_sha256 = _held(engine, job_id)['content_sha256']
+    with engine.begin() as conn:
+        conn.execute(text('UPDATE reviewer_projects SET synced_at = now() WHERE user_id = :user_id'),
+                     {'user_id': reviewer_id})
     with engine.begin() as conn:
         conn.execute(text('SELECT 1 FROM job_requests WHERE job_id = :job_id FOR UPDATE'), {'job_id': job_id})
         conn.execute(
@@ -177,8 +221,12 @@ def _expect_sqlstate(engine, code, sql, **params):
     assert excinfo.value.orig.pgcode == code
 
 
-def _hold_result(repo, job_id, content='count=7\n'):
-    return repo.complete_job_with_held_output(job_id, status='success', kind='result', content=content)
+def _hold_result(repo, job_id, content='count=7\n', attested=True):
+    """Hold a result; its attested hash matches it unless attested is False (None) or a hash."""
+    attested_output_hash = _sha256(content) if attested is True else (attested or None)
+    return repo.complete_job_with_held_output(
+        job_id, status='success', kind='result', content=content, attested_output_hash=attested_output_hash,
+    )
 
 
 class TestBackfill:
@@ -385,6 +433,41 @@ class TestCompleteJobWithHeldOutput:
         assert job['release_status'] == final_status
         assert job['output_sha256'] == _sha256('reviewed result')
 
+    @pytest.mark.parametrize('decision, final_status', [('approve', 'released'), ('reject', 'withheld')])
+    def test_a_rerun_after_a_decision_keeps_the_reviewed_attestation_and_receipts(
+        self, repo, engine, decision, final_status,
+    ):
+        job_id = _new_job(engine, f'JOB-H-RERUN-KEEP-{decision}')
+        run_fields = ('attestation', 'verification_receipt', 'job_id_committed', 'researcher_nonce',
+                      'commitment_receipt', 'ha_receipt', 'enclave_version', 'enclave_pcr0', 'error_message')
+        repo.complete_job_with_held_output(
+            job_id, status='success', kind='result', content='reviewed result',
+            attested_output_hash=_sha256('reviewed result'), execution_metrics={'total': 1},
+            **{field: f'reviewed {field}' for field in run_fields},
+        )
+        _decide(engine, job_id, decision, reason='aggregate only' if decision == 'reject' else None)
+        before_job, before_held = _job(engine, job_id), _held(engine, job_id)
+
+        # An operator reset the status, so the job runs again
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE job_requests SET status = 'cloned' WHERE job_id = :job_id"), {'job_id': job_id})
+        repo.complete_job_with_held_output(
+            job_id, status='success', kind='result', content='unreviewed result',
+            attested_output_hash=_sha256('unreviewed result'), execution_metrics={'total': 2},
+            **{field: f'new {field}' for field in run_fields},
+        )
+        repo.complete_job_with_held_output(
+            job_id, status='failed', kind='error', content='new error', error_message=HELD_ERROR_MESSAGE,
+            attestation='error run attestation',
+        )
+
+        assert _held(engine, job_id) == before_held
+        job = _job(engine, job_id)
+        for field in run_fields + ('output_sha256', 'execution_metrics', 'release_status'):
+            assert job[field] == before_job[field], field
+        assert job['release_status'] == final_status
+        assert job['status'] == 'success'
+
     def test_leaves_job_outputs_alone_for_a_job_released_before_the_gate(self, repo, engine):
         _hold_result(repo, 'JOB-OLD-SUCCESS', 'rerun result')
 
@@ -577,6 +660,257 @@ class TestUpdateJobAiResults:
         assert repo.get_job(job_id)['ai_decision'] == 'ai_approved'
 
 
+def _refresh(engine, reviewer_id):
+    with engine.begin() as conn:
+        conn.execute(text('UPDATE reviewer_projects SET synced_at = now() WHERE user_id = :user_id'),
+                     {'user_id': reviewer_id})
+
+
+def _expect_refused(engine, code, job_id, reviewer_id=BOB, decision='approve', sha=None, reason=None):
+    held = _held(engine, job_id)
+    _expect_sqlstate(
+        engine, code, INSERT_DECISION, job_id=job_id, decision=decision,
+        sha=sha or held['content_sha256'], reviewer=reviewer_id, reason=reason,
+    )
+    assert _rows(engine, 'SELECT id FROM release_decisions WHERE job_id = :job_id', job_id=job_id) == []
+    assert _held(engine, job_id) == held
+
+
+class TestProjectRouting:
+    """The decision guard checks added by c5e2a8d4b7f1."""
+
+    def test_the_decision_records_the_job_project(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-P-STAMP')
+        _hold_result(repo, job_id)
+        _refresh(engine, BOB)
+
+        with engine.begin() as conn:
+            # A project named by the caller is replaced by the job's own
+            conn.execute(
+                text('INSERT INTO release_decisions (job_id, decision, output_sha256, reviewer_id, project_id) '
+                     'VALUES (:job_id, :decision, :sha, :reviewer, :project_id)'),
+                {'job_id': job_id, 'decision': 'approve', 'sha': _sha256('count=7\n'), 'reviewer': BOB,
+                 'project_id': OTHER_PROJECT},
+            )
+
+        assert _rows(engine, 'SELECT project_id::text FROM release_decisions WHERE job_id = :job_id',
+                     job_id=job_id) == [{'project_id': PROJECT}]
+
+    @pytest.mark.parametrize('reviewer_id', [DAVE, ERIN, CAROL, FRANK],
+                             ids=['pending-reviewer', 'rejected-reviewer', 'staff', 'researcher'])
+    def test_only_an_approved_reviewer_may_decide(self, repo, engine, reviewer_id):
+        job_id = _new_job(engine, f'JOB-P-RG002-{reviewer_id[-2:]}')
+        _hold_result(repo, job_id)
+        # Assigned and confirmed: only the account itself is refused
+        _assign(engine, reviewer_id, PROJECT)
+
+        _expect_refused(engine, 'RG002', job_id, reviewer_id)
+        _expect_refused(engine, 'RG002', job_id, reviewer_id, decision='reject', reason='row-level output')
+
+    def test_a_reviewer_demoted_to_researcher_may_not_decide(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-P-DEMOTED')
+        _hold_result(repo, job_id)
+        _assign(engine, GRACE, PROJECT)
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE users SET role = 'user' WHERE id = :id"), {'id': GRACE})
+        try:
+            _expect_refused(engine, 'RG002', job_id, GRACE)
+        finally:
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE users SET role = 'reviewer' WHERE id = :id"), {'id': GRACE})
+            _unassign_all(engine, GRACE)
+
+    def test_a_job_without_a_project_cannot_be_decided(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-P-NO-PROJECT', project_id=None, archetype_id=None)
+        _hold_result(repo, job_id)
+        _refresh(engine, BOB)
+
+        _expect_refused(engine, 'RG006', job_id)
+        _expect_refused(engine, 'RG006', job_id, decision='reject', reason='row-level output')
+        assert _job(engine, job_id)['release_status'] == 'pending'
+
+    def test_a_reviewer_of_another_project_cannot_decide(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-P-OTHER-PROJECT', project_id=OTHER_PROJECT)
+        _hold_result(repo, job_id)
+        _refresh(engine, BOB)  # bob reviews PROJECT only
+
+        _expect_refused(engine, 'RG007', job_id)
+        _expect_refused(engine, 'RG007', job_id, decision='reject', reason='row-level output')
+
+    def test_an_assignment_must_be_confirmed_in_the_last_5_minutes(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-P-STALE')
+        _hold_result(repo, job_id)
+        _assign(engine, GRACE, PROJECT, minutes_ago=6)
+        try:
+            _expect_refused(engine, 'RG008', job_id, GRACE)
+            _expect_refused(engine, 'RG008', job_id, GRACE, decision='reject', reason='row-level output')
+
+            _assign(engine, GRACE, PROJECT, minutes_ago=4)
+            with engine.begin() as conn:
+                conn.execute(text(INSERT_DECISION), {'job_id': job_id, 'decision': 'approve',
+                                                     'sha': _sha256('count=7\n'), 'reviewer': GRACE, 'reason': None})
+            assert _rows(engine, 'SELECT reviewer_id::text FROM release_decisions WHERE job_id = :job_id',
+                         job_id=job_id) == [{'reviewer_id': GRACE}]
+        finally:
+            _unassign_all(engine, GRACE)
+
+    @pytest.mark.parametrize('attested', [False, 'b' * 64], ids=['not-attested', 'different-attested-hash'])
+    def test_a_result_is_approved_only_when_it_matches_the_attested_hash(self, repo, engine, attested):
+        job_id = _new_job(engine, f'JOB-P-RG009-{bool(attested)}')
+        _hold_result(repo, job_id, attested=attested)
+        _refresh(engine, BOB)
+
+        _expect_refused(engine, 'RG009', job_id)
+
+        # It can still be withheld
+        _decide(engine, job_id, 'reject', reason='output does not match its attestation')
+        assert _job(engine, job_id)['release_status'] == 'withheld'
+
+    def test_held_error_text_may_be_approved_without_an_attestation(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-P-ERROR-TEXT')
+        repo.complete_job_with_held_output(
+            job_id, status='failed', kind='error', content='Traceback: KeyError', error_message=HELD_ERROR_MESSAGE,
+        )
+
+        _decide(engine, job_id, 'approve')
+
+        assert _job(engine, job_id)['release_status'] == 'released'
+
+    def test_a_dev_database_may_allow_unattested_release(self, repo, engine):
+        allowed = _new_job(engine, 'JOB-P-GUC-ON')
+        refused = _new_job(engine, 'JOB-P-GUC-OFF')
+        for job_id in (allowed, refused):
+            _hold_result(repo, job_id, attested=False)
+        _refresh(engine, BOB)
+
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL epsilon.allow_unattested_release = 'on'"))
+            conn.execute(text(INSERT_DECISION), {'job_id': allowed, 'decision': 'approve',
+                                                 'sha': _sha256('count=7\n'), 'reviewer': BOB, 'reason': None})
+
+        assert _rows(engine, 'SELECT decision FROM release_decisions WHERE job_id = :job_id', job_id=allowed) == [
+            {'decision': 'approve'}
+        ]
+        # SET LOCAL ended with its transaction
+        _expect_refused(engine, 'RG009', refused)
+
+
+class TestDecisionCheckOrder:
+    """Where two checks fail at once, the earlier one in the trigger is reported."""
+
+    def test_own_job_before_the_account(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-O-OWN', user_id=DAVE)
+        _hold_result(repo, job_id)
+
+        _expect_refused(engine, 'RG001', job_id, DAVE)
+
+    def test_the_account_before_the_release_status(self, engine):
+        job_id = _new_job(engine, 'JOB-O-ACCOUNT')
+
+        _expect_sqlstate(engine, 'RG002', INSERT_DECISION, job_id=job_id, decision='approve', sha='a' * 64,
+                         reviewer=CAROL, reason=None)
+
+    def test_the_release_status_before_the_project(self, engine):
+        job_id = _new_job(engine, 'JOB-O-STATUS', project_id=None, archetype_id=None)
+
+        _expect_sqlstate(engine, 'RG003', INSERT_DECISION, job_id=job_id, decision='approve', sha='a' * 64,
+                         reviewer=BOB, reason=None)
+
+    def test_the_project_before_the_assignment(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-O-PROJECT', project_id=None, archetype_id=None)
+        _hold_result(repo, job_id)
+
+        _expect_refused(engine, 'RG006', job_id, GRACE)  # grace has no assignment at all
+
+    def test_the_assignment_age_before_the_output_hash(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-O-STALE-HASH')
+        _hold_result(repo, job_id)
+        _assign(engine, GRACE, PROJECT, minutes_ago=6)
+        try:
+            _expect_refused(engine, 'RG008', job_id, GRACE, sha='a' * 64)
+        finally:
+            _unassign_all(engine, GRACE)
+
+    def test_the_output_hash_before_the_attestation(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-O-HASH-ATTESTATION')
+        _hold_result(repo, job_id, attested=False)
+        _refresh(engine, BOB)
+
+        _expect_refused(engine, 'RG004', job_id, sha='a' * 64)
+
+
+class TestProjectIsFixed:
+    def test_a_recorded_project_or_archetype_cannot_change(self, engine):
+        job_id = _new_job(engine, 'JOB-F-CHANGE')
+
+        for sql in ('UPDATE job_requests SET project_id = :other WHERE job_id = :job_id',
+                    'UPDATE job_requests SET project_id = NULL WHERE job_id = :job_id',
+                    "UPDATE job_requests SET archetype_id = 'other-archetype' WHERE job_id = :job_id",
+                    'UPDATE job_requests SET archetype_id = NULL WHERE job_id = :job_id'):
+            _expect_sqlstate(engine, 'RG025', sql, job_id=job_id, other=OTHER_PROJECT)
+
+        # The same values again are no change
+        with engine.begin() as conn:
+            conn.execute(text('UPDATE job_requests SET project_id = :project, archetype_id = :archetype '
+                              'WHERE job_id = :job_id'),
+                         {'project': PROJECT.upper(), 'archetype': ARCHETYPE, 'job_id': job_id})
+        job = _job(engine, job_id)
+        assert (str(job['project_id']), job['archetype_id']) == (PROJECT, ARCHETYPE)
+
+    def test_a_missing_project_may_be_set_once(self, engine):
+        job_id = _new_job(engine, 'JOB-F-SET-ONCE', project_id=None, archetype_id=None)
+
+        with engine.begin() as conn:
+            conn.execute(text('UPDATE job_requests SET project_id = :project, archetype_id = :archetype '
+                              'WHERE job_id = :job_id'),
+                         {'project': PROJECT, 'archetype': ARCHETYPE, 'job_id': job_id})
+
+        job = _job(engine, job_id)
+        assert (str(job['project_id']), job['archetype_id']) == (PROJECT, ARCHETYPE)
+        _expect_sqlstate(engine, 'RG025', 'UPDATE job_requests SET project_id = :other WHERE job_id = :job_id',
+                         job_id=job_id, other=OTHER_PROJECT)
+
+
+class TestRecordJobProject:
+    def test_records_the_project_and_archetype_and_a_rerun_records_them_again(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-R-RECORD', project_id=None, archetype_id=None)
+
+        repo.record_job_project(job_id, PROJECT, ARCHETYPE)
+        repo.record_job_project(job_id, PROJECT, ARCHETYPE)
+
+        job = _job(engine, job_id)
+        assert (str(job['project_id']), job['archetype_id']) == (PROJECT, ARCHETYPE)
+        assert repo.get_job(job_id)['project_id'] == PROJECT
+        assert repo.get_job(job_id)['archetype_id'] == ARCHETYPE
+
+    @pytest.mark.parametrize('project_id, archetype_id', [(OTHER_PROJECT, ARCHETYPE), (PROJECT, 'other-archetype')],
+                             ids=['project', 'archetype'])
+    def test_a_rerun_naming_another_project_or_archetype_is_refused(self, repo, engine, project_id, archetype_id):
+        job_id = _new_job(engine, f'JOB-R-CHANGE-{archetype_id}-{project_id[:4]}')
+
+        with pytest.raises(ProjectChangedError):
+            repo.record_job_project(job_id, project_id, archetype_id)
+
+        job = _job(engine, job_id)
+        assert (str(job['project_id']), job['archetype_id']) == (PROJECT, ARCHETYPE)
+
+    def test_an_unknown_job_is_an_error(self, repo):
+        with pytest.raises(ValueError, match='not found'):
+            repo.record_job_project('JOB-R-MISSING', PROJECT, ARCHETYPE)
+
+
+class TestGetSubmitterSub:
+    def test_returns_the_external_id_of_the_job_submitter(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-U-SUB')
+        legacy = _new_job(engine, 'JOB-U-LEGACY', user_id=FRANK)
+
+        assert repo.get_submitter_sub(job_id) == ALICE_SUB
+        assert repo.get_submitter_sub(legacy) == 'ext-f'
+
+    def test_an_unknown_job_has_no_submitter(self, repo):
+        assert repo.get_submitter_sub('JOB-U-MISSING') is None
+
+
 class TestDowngrade:
     def test_refuses_while_output_is_held_and_round_trips_when_empty(self):
         with _fresh_database() as url:
@@ -587,9 +921,10 @@ class TestDowngrade:
                 repo, engine = JobRepository(database), database.engine
                 _hold_result(repo, 'JOB-INFLIGHT')
 
+                # One transaction: the project revision's downgrade is rolled back too
                 with pytest.raises(DBAPIError, match='refusing to downgrade'):
                     _alembic(url, command.downgrade, BASE_REVISION)
-                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': GATE_REVISION}]
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
                 assert _held(engine, 'JOB-INFLIGHT') is not None
 
                 with engine.begin() as conn:
@@ -599,16 +934,16 @@ class TestDowngrade:
                 assert _rows(
                     engine,
                     "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_name IN ('job_outputs', 'release_decisions')",
+                    "WHERE table_name IN ('job_outputs', 'release_decisions', 'reviewer_projects')",
                 ) == []
                 assert _rows(
                     engine,
                     "SELECT column_name FROM information_schema.columns WHERE table_name = 'job_requests' "
-                    "AND column_name IN ('release_status', 'ai_decision', 'output_sha256')",
+                    "AND column_name IN ('release_status', 'ai_decision', 'output_sha256', 'project_id', 'archetype_id')",
                 ) == []
 
                 _alembic(url, command.upgrade, 'head')
-                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': GATE_REVISION}]
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
                 # JOB-INFLIGHT finished in between, so the re-run backfill releases it.
                 assert _job(engine, 'JOB-INFLIGHT')['release_status'] == 'released'
                 assert _job(engine, 'JOB-QUEUED')['release_status'] is None

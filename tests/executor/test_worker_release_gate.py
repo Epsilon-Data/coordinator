@@ -24,6 +24,8 @@ from workers.executor.tdx_verifier import TdxVerificationResult
 from workers.executor.worker import ExecutorWorker, UNSTORED_OUTPUT_MESSAGE, _attested_output_hash
 
 JOB_ID = 'JOB-RG-1'
+PROJECT_ID = 'eba92dec-17a1-4a47-816e-77087ceb9531'
+SUBMITTER_SUB = '5d0b0a8e-3c1f-4b7a-9e2d-6f4a1c8b2e90'
 MARKER = 'MARKER-7f3a9c2d-real-data-row-count-4217'
 AUTHENTICITY_CHECKS = ['syntax_valid', 'certificate_chain_valid', 'signature_valid', 'pcr_verified']
 
@@ -183,19 +185,23 @@ def proxy():
 
 
 @pytest.fixture
-def secure_worker(storage, enclave, middleware, proxy, atl, job_logs):
-    """Real SecureExecutor + JobLogger; only the enclave, the data clients and job_logs writes are faked."""
+def secure_worker(storage, enclave, middleware, proxy, atl, job_logs, repo):
+    """Real SecureExecutor + JobLogger; only the enclave, the data clients, the access check and DB writes are faked."""
     build = storage / 'repositories' / JOB_ID / 'build'
     (build / 'generated').mkdir(parents=True)
     (build / 'build.yml').write_text(
         'analysis:\n'
         '  script_file: main.py\n'
         'datasets:\n'
-        '  - dataset_id: ds-001\n'
+        f'  - dataset_id: {PROJECT_ID}\n'
         '    archetype_id: arch-001\n'
     )
     (build / 'main.py').write_text('print("hello")')
 
+    # Both modules use the one shared job_repository, as in production
+    repo.get_submitter_sub.return_value = SUBMITTER_SUB
+    access_client = MagicMock()
+    access_client.check_project_access.return_value = True
     settings = MagicMock()
     settings.middleware.use_direct_db = False
     with patch('workers.executor.executor.ZipService') as zip_service:
@@ -204,8 +210,10 @@ def secure_worker(storage, enclave, middleware, proxy, atl, job_logs):
         )
         secure_executor = SecureExecutor(
             enclave_client=enclave, settings=settings, middleware_client=middleware, proxy_client=proxy,
+            access_client=access_client,
         )
-    return _make_worker(secure_executor, storage, atl_client=atl)
+    with patch('workers.executor.executor.job_repository', repo):
+        yield _make_worker(secure_executor, storage, atl_client=atl)
 
 
 class TestSuccess:
@@ -597,6 +605,7 @@ class TestVerificationReceipt:
             valid=True, syntax_valid=True, certificate_chain_valid=True, aws_signature_valid=True,
             pcr_verified=True, output_verified=True, pcr0='aa', pcr1='bb', pcr2='cc',
             output_hash='AB' * 32, module_id='i-0abc', timestamp=None, error=None, timing={},
+            user_data={'output_hash': 'AB' * 32},
         )
         attestation = {'attestation': {'attestation_document': 'ZG9j'}}
 
@@ -613,6 +622,7 @@ class TestVerificationReceipt:
             pcr_verified=True, output_verified=False, pcr0='aa', pcr1='bb', pcr2='cc',
             output_hash='ab' * 32, module_id='i-0abc', timestamp=None, timing={},
             error=f"Output hash mismatch: got {'ab' * 32}, expected {_sha256('out')}",
+            user_data={'output_hash': 'ab' * 32},
         )
         attestation = {'attestation': {'attestation_document': 'ZG9j'}}
 
@@ -623,15 +633,20 @@ class TestVerificationReceipt:
         assert _sha256('out') not in receipt
         assert _attested_output_hash(receipt) == 'ab' * 32
 
-    def test_tdx_receipt_has_no_output_hash(self, worker):
+    def test_tdx_receipt_records_the_attested_output_hash(self, worker):
         attestation = {'attestation': {'backend': 'tdx', 'attestation_document': 'ZG9j'}}
-        tdx_result = TdxVerificationResult(valid=True, measurements={'mrtd': 'aa'})
+        tdx_result = TdxVerificationResult(
+            valid=True, syntax_valid=True, certificate_chain_valid=True, signature_valid=True,
+            pcr_verified=True, output_verified=True, measurements={'mrtd': 'aa'}, output_hash=_sha256('out'),
+        )
 
-        with patch('workers.executor.worker.verify_tdx_attestation', return_value=tdx_result):
-            receipt = json.loads(worker._verify_attestation(JOB_ID, attestation, MagicMock(), expected_output='out'))
+        with patch('workers.executor.worker.verify_tdx_attestation', return_value=tdx_result) as verify:
+            receipt = worker._verify_attestation(JOB_ID, attestation, MagicMock(), expected_output='out')
 
-        assert receipt['output_hash'] is None
-        assert receipt['pcrs']['pcr0'] == 'aa'
+        assert verify.call_args.kwargs['expected_output'] == 'out'
+        assert json.loads(receipt)['output_hash'] == _sha256('out')
+        assert json.loads(receipt)['pcrs']['pcr0'] == 'aa'
+        assert _attested_output_hash(receipt) == _sha256('out')
 
     @pytest.mark.parametrize('receipt', [
         None,

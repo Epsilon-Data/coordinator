@@ -83,6 +83,12 @@ class JobRequest(Base):
     ai_decision: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # Advisory only
     output_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
+    # The job's platform project (build.yml datasets[0].dataset_id) and archetype, recorded
+    # before real data is requested; held output is routed to the project's reviewers.
+    # A recorded value cannot change (migration c5e2a8d4b7f1, RG025).
+    project_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True)
+    archetype_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
