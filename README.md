@@ -97,6 +97,9 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `USE_LOCAL_ENCLAVE` | Use local simulation instead of Nitro Enclave | `false` |
 | `ENCLAVE_VSOCK_PORT` | vsock port for enclave communication | `5005` |
 | `MIDDLEWARE_ENDPOINT_URL` | Lambda middleware URL for data fetch | *required for executor* |
+| `EPSILON_API_URL` | Epsilon API base URL, including its global prefix (the API's `API_BASE_URL`, default `/api/v1/hub`), for the project access check, e.g. `https://app.epsilon-data.org/api/v1/hub` | *required for executor* |
+| `EPSILON_COORDINATOR_CLIENT_SECRET` | Secret of the API's coordinator client (`EPSILON_COORDINATOR_CLIENT_ID`, default `coordinator-client`) | *required for executor* |
+| `PROJECT_ACCESS_CHECK` | `enforce`, or `disabled` (honoured only when the resolved enclave backend is local: `ENCLAVE_BACKEND=local`, or `ENCLAVE_BACKEND` unset and `USE_LOCAL_ENCLAVE=true`) | `enforce` |
 | `AWS_REGION` | AWS region | `ap-southeast-2` |
 | `POLLING_INTERVAL` | Job polling interval in seconds | `5` |
 | `LOG_LEVEL` | Logging level | `INFO` |
@@ -346,6 +349,8 @@ alembic upgrade head
 # Generate a new migration after model changes
 alembic revision --autogenerate -m "description"
 ```
+
+With the local enclave, results carry no authentic attestation, so reviewers cannot approve them (RG009, "not attested") unless the local database allows it: `ALTER DATABASE <db> SET epsilon.allow_unattested_release = on`. Use this on local/test databases only, never on production.
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/). See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 

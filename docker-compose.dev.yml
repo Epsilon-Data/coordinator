@@ -64,6 +64,12 @@ services:
       MIDDLEWARE_ENDPOINT_URL: http://host.docker.internal:8001
       MIDDLEWARE_MODE: local
       USE_LOCAL_ENCLAVE: "true"
+      # Project access check (Epsilon API); 'disabled' is honoured only with the local enclave.
+      # Approving local-enclave results needs epsilon.allow_unattested_release on the dev DB (see .env.example)
+      EPSILON_API_URL: ${EPSILON_API_URL:-}
+      EPSILON_COORDINATOR_CLIENT_ID: ${EPSILON_COORDINATOR_CLIENT_ID:-coordinator-client}
+      EPSILON_COORDINATOR_CLIENT_SECRET: ${EPSILON_COORDINATOR_CLIENT_SECRET:-}
+      PROJECT_ACCESS_CHECK: ${PROJECT_ACCESS_CHECK:-enforce}
     volumes:
       - ./shared_storage:/shared/epsilon
     networks:

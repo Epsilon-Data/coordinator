@@ -111,6 +111,19 @@ datasets: []
         assert success is True
         assert 'Hello from enclave!' in output
 
+    def test_send_encrypted_data_accepts_atl_arguments(self, enclave_client, sample_zip_with_script):
+        """The executor always passes the ATL nonce and context hash."""
+        public_key, session_id = enclave_client.get_public_key('JOB-123')
+        encrypted_zip = enclave_client.encrypt_zip_data(sample_zip_with_script, public_key)
+
+        success, output, _attestation = enclave_client.send_encrypted_data_to_enclave(
+            session_id, encrypted_zip, None,
+            atl_nonce=b'\x01' * 32, atl_context_hash=b'\x02' * 32,
+        )
+
+        assert success is True
+        assert 'Hello from enclave!' in output
+
     def test_send_encrypted_data_with_csv(self, enclave_client, sample_zip_with_script, sample_csv_data):
         """Test execution with encrypted CSV data."""
         # Create ZIP with script that reads CSV

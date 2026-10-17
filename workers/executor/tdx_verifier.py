@@ -37,6 +37,10 @@ class TdxVerificationResult:
     output_verified: bool = False
     measurements: Dict[str, str] = field(default_factory=dict)  # mrtd, rtmr0..n
     report_data: Optional[str] = None
+    # Read from the proof only when the verified quote's REPORTDATA binds it
+    output_hash: Optional[str] = None
+    dataset_hash: Optional[str] = None
+    context_hash: Optional[str] = None
     module_id: str = "tdx"
     error: Optional[str] = None
 
@@ -66,6 +70,7 @@ def _run_tdverify(quote: bytes) -> Dict[str, Any]:
 def verify_tdx_attestation(
     att_doc: Dict[str, Any],
     expected_mrtd: Optional[str] = EXPECTED_MRTD,
+    expected_output: Optional[str] = None,
 ) -> TdxVerificationResult:
     """Verify a TDX attestation document produced by ``TdxAttestationService``.
 
@@ -73,6 +78,9 @@ def verify_tdx_attestation(
         att_doc: The attestation payload ``{"attestation": {...}, "proof": {...}}``.
         expected_mrtd: Expected TD image measurement (hex). When None, the MRTD is
             recorded but not enforced (pcr_verified stays False).
+        expected_output: The output the coordinator received. When given, output_verified
+            also requires the attested output hash to equal its SHA-256, as in the
+            Nitro verifier.
     """
     result = TdxVerificationResult()
     try:
@@ -108,6 +116,20 @@ def verify_tdx_attestation(
         if quote_ok and proof_canonical and result.report_data:
             expected_report_data = hashlib.sha512(proof_canonical.encode()).hexdigest()
             result.output_verified = (expected_report_data == result.report_data.lower())
+
+        # Only the bound proof is attested; the proof's other fields travel unsigned.
+        if result.output_verified:
+            bound = json.loads(proof_canonical)
+            if isinstance(bound, dict):
+                result.output_hash = bound.get("output_hash") or None
+                result.dataset_hash = bound.get("dataset_hash") or None
+                result.context_hash = bound.get("context_hash") or bound.get("atl_context_hash") or None
+            if expected_output is not None:
+                expected_output_hash = hashlib.sha256(expected_output.encode()).hexdigest()
+                if not isinstance(result.output_hash, str) or result.output_hash.lower() != expected_output_hash:
+                    result.output_verified = False
+                    # As in the worker's Nitro receipt: no hashes, the held output's is not public
+                    result.error = "Output hash mismatch"
 
         result.valid = (
             result.syntax_valid

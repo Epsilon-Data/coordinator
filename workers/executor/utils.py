@@ -1,13 +1,17 @@
 """
 Utilities for executor worker: logging configuration.
 """
+import hashlib
 import logging
 import logging.handlers
+import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from workers.executor.settings import get_settings
+
+_UUID_PATTERN = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 
 
 class ContextFilter(logging.Filter):
@@ -92,3 +96,20 @@ def get_logger(name: str) -> logging.Logger:
         short_name = name
 
     return logging.getLogger(f"epsilon.executor.{short_name}")
+
+
+def held_text_digest(text: Optional[str]) -> str:
+    """Describe text that must not be logged (enclave output or error text held for review).
+
+    The SHA-256 prefix matches job_outputs.content_sha256 when the same text is held.
+    """
+    text = "" if text is None else str(text)
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"len={len(text)} sha256={digest}"
+
+
+def canonical_uuid(value: Any) -> Optional[str]:
+    """The lower-case form of a UUID written as 8-4-4-4-12 hex digits, or None if value is not one."""
+    if not isinstance(value, str) or not _UUID_PATTERN.fullmatch(value):
+        return None
+    return value.lower()

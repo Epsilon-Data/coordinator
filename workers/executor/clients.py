@@ -33,6 +33,7 @@ from workers.executor.services import CryptoService
 from workers.executor.exceptions import EnclaveConnectionError
 from workers.executor.settings import get_settings, ProxyConfig
 from workers.executor.constants import EnclaveOperations, MiddlewareModes
+from workers.executor.utils import held_text_digest
 
 logger = logging.getLogger("epsilon.executor")
 
@@ -171,7 +172,8 @@ class EnclaveClient(IEnclaveClient):
                 return True, response.get('output', ''), attestation
             else:
                 error_msg = response.get('error', 'Unknown error')
-                logger.error(f"[ENCLAVE] Execution failed: {error_msg}")
+                # The enclave's error text may carry real-data output; it is held for review
+                logger.error(f"[ENCLAVE] Execution failed ({held_text_digest(error_msg)})")
                 return False, error_msg, None
 
         except Exception as e:
@@ -236,7 +238,7 @@ class EnclaveClient(IEnclaveClient):
                 return True, response.get('output', ''), attestation
             else:
                 error_msg = response.get('error', 'Unknown error')
-                logger.error(f"[ENCLAVE] DB fetch execution failed: {error_msg}")
+                logger.error(f"[ENCLAVE] DB fetch execution failed ({held_text_digest(error_msg)})")
                 return False, error_msg, None
 
         except Exception as e:
@@ -263,16 +265,8 @@ class EnclaveClient(IEnclaveClient):
             # sendall (300s timeout) on payloads larger than that limit.
             sock.sendall(struct.pack('!I', len(body)) + body)
 
-            # The enclave replies with the same 4-byte length-prefix framing it
-            # received, then closes the connection (one request per connection).
-            # _recv_all drains until close; strip the header before decoding.
-            response_data = self._recv_all(sock)
-            if len(response_data) < 4:
-                raise ConnectionError(
-                    f"enclave returned {len(response_data)} bytes; expected a length-prefixed response"
-                )
-            msg_len = struct.unpack('!I', response_data[:4])[0]
-            response = json.loads(response_data[4:4 + msg_len].decode())
+            response_data = self._recv_response(sock)
+            response = json.loads(response_data.decode())
 
             return response
 
@@ -282,12 +276,46 @@ class EnclaveClient(IEnclaveClient):
         finally:
             sock.close()
 
+    HEADER_SIZE = 4  # 4-byte big-endian length prefix (see server.EnclaveServer)
     MAX_RESPONSE_SIZE = 100 * 1024 * 1024  # 100 MB
 
-    def _recv_all(self, sock: socket.socket) -> bytes:
-        """Receive complete response with chunked reading."""
-        chunks = []
-        total_size = 0
+    def _recv_response(self, sock: socket.socket) -> bytes:
+        """Receive the enclave's reply to a length-prefixed request.
+
+        The enclave answers it with a 4-byte big-endian length, then the JSON
+        (server.EnclaveServer._send_response). A reply starting with '{' is an
+        unframed legacy reply, read until the enclave closes the connection.
+        """
+        header = self._recv_exact(sock, self.HEADER_SIZE)
+        if header is None:
+            raise EnclaveConnectionError("Enclave closed connection before response header")
+        if header[:1] == b'{':
+            return self._recv_all(sock, initial=header)
+
+        msg_len = struct.unpack('!I', header)[0]
+        if msg_len == 0 or msg_len > self.MAX_RESPONSE_SIZE:
+            raise EnclaveConnectionError(f"Invalid enclave response length: {msg_len}")
+
+        body = self._recv_exact(sock, msg_len)
+        if body is None:
+            raise EnclaveConnectionError("Enclave closed connection mid-response")
+        return body
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
+        """Receive exactly n bytes in 64KB chunks, or None if the peer closes early."""
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(min(n - len(buf), 65536))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _recv_all(self, sock: socket.socket, initial: bytes = b'') -> bytes:
+        """Receive an unframed (legacy) response with chunked reading."""
+        chunks = [initial] if initial else []
+        total_size = len(initial)
         while True:
             try:
                 chunk = sock.recv(65536)  # 64KB chunks
@@ -451,7 +479,7 @@ class EnclaveClientTDX(IEnclaveClient):
             response = self._send_to_td(request)
             if not response.get('success'):
                 error_msg = response.get('error', 'Unknown error')
-                logger.error(f"[TDX] Execution failed: {error_msg}")
+                logger.error(f"[TDX] Execution failed ({held_text_digest(error_msg)})")
                 return False, error_msg, None
 
             attestation = response.get('attestation')
@@ -553,9 +581,14 @@ class EnclaveClientLocal(IEnclaveClient):
         self,
         session_id: str,
         encrypted_zip: str,
-        encrypted_csv: Optional[str] = None
+        encrypted_csv: Optional[str] = None,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
     ) -> Tuple[bool, str, Optional[Dict]]:
         """Execute encrypted payloads with Zero Trust decryption.
+
+        atl_nonce / atl_context_hash are accepted for interface parity and
+        ignored: the local attestation is not bound to the ATL.
 
         Returns:
             Tuple of (success, output, attestation_data) - attestation is None for local mode
@@ -895,7 +928,8 @@ class MiddlewareClient(IMiddlewareClient):
 
                 if response.status_code >= HTTP_ERROR_THRESHOLD:
                     logger.error(f"[MIDDLEWARE-ERROR] HTTP {response.status_code} received")
-                    logger.debug(f"[MIDDLEWARE-ERROR] Response body: {response.text[:500]}")
+                    # The middleware reads the real dataset: its error text may carry row values
+                    logger.debug(f"[MIDDLEWARE-ERROR] Response body ({held_text_digest(response.text)})")
 
                     # Parse error if JSON
                     try:
@@ -988,7 +1022,7 @@ class MiddlewareClient(IMiddlewareClient):
                 time.sleep(delay)
 
             except Exception as e:
-                logger.error(f"[MIDDLEWARE] Unexpected error: {e}", exc_info=True)
+                logger.error(f"[MIDDLEWARE] Unexpected error: {type(e).__name__} ({held_text_digest(str(e))})")
                 return MiddlewareResponse(success=False, error=str(e))
 
         # All retries exhausted
@@ -1115,22 +1149,25 @@ class ProxyClient:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('error', error_msg)
-                    logger.error(f"[PROXY] Error response: {error_data}")
+                    # message is the data owner's database error, which may carry row values
+                    logger.error(
+                        f"[PROXY] Error response: HTTP {response.status_code} code={error_data.get('error')} "
+                        f"({held_text_digest(error_data.get('message'))})"
+                    )
                 except Exception:
-                    logger.error(f"[PROXY] Raw error response: {response.text[:500]}")
+                    logger.error(f"[PROXY] Raw error response ({held_text_digest(response.text)})")
                 raise RuntimeError(f"[PROXY] Query failed: {error_msg}")
 
             data = response.json()
 
             if not data.get('success', False):
-                logger.error(f"[PROXY] Query not successful: {data}")
+                logger.error(f"[PROXY] Query not successful: code={data.get('error')}")
                 raise RuntimeError(f"[PROXY] Query failed: {data.get('error', 'Unknown error')}")
 
             encrypted_csv = data.get('encrypted_csv', '')
             metadata = data.get('metadata', {})
 
-            logger.info(f"[PROXY] Success! Encrypted CSV: {len(encrypted_csv)} chars, "
-                        f"metadata: {metadata}")
+            logger.info(f"[PROXY] Success! Encrypted CSV: {len(encrypted_csv)} chars")
 
             return ProxyResponse(
                 encrypted_csv=encrypted_csv,

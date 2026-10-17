@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import shutil
 import time
@@ -119,7 +120,7 @@ class CodeExecutorTool(BaseTool):
                 error_message=f"Path traversal detected: {script_file}"
             )
 
-        command = ["python", script_file]
+        command = [sys.executable, script_file]
 
         # Execute the command
         try:

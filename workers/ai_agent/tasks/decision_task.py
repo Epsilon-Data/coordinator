@@ -17,39 +17,36 @@ def create_decision_task(agent: Agent, job_id: str) -> Task:
         ============================================================
 
         APPROVE if ALL of these are true:
-          - AST scanner reported ZERO findings (no blocked imports, no dangerous calls)
-          - Output disclosure checker reported ZERO findings (no leakage detected)
-          - Code execution succeeded (return code 0)
-          - The analyzer confirmed the script is safe
+          - AST scanner reported ZERO security findings
+          - Output disclosure checker reported ZERO findings
+          - The analyzer confirmed no data privacy violations
+          - Script returns ONLY aggregate statistics, model outputs, or plots
           → Set confidence_score 0.9-1.0
 
         REJECT if ANY of these are true:
-          - AST scanner found any 'critical' severity finding
-          - AST scanner found blocked imports (network, subprocess, etc.)
-          - AST scanner found dangerous function calls (eval, exec, os.system)
-          - Output checker found credential leaks in stdout/files
-          - Output checker found encoded data blocks (exfiltration risk)
-          - Code execution failed (return code ≠ 0) for security-related reasons
+          - AST scanner found blocked imports or dangerous calls (SECURITY)
+          - Output checker found credential leaks or encoded data (SECURITY)
+          - Script returns individual-level PII fields in output (PRIVACY)
+          - Script prints patient records with identifying info (PRIVACY)
+          - Script writes raw patient data to files (PRIVACY)
+          - Script returns groups smaller than 5 with sensitive data (PRIVACY)
+          - Script concatenates or exposes PII fields in output (PRIVACY)
           → Set confidence_score 0.8-1.0
 
         FLAG FOR CAUTION (approve with lower confidence) if:
-          - Only 'medium' or 'low' findings from scanners
-          - Unknown imports that aren't on the blocked list
-          - Minor output disclosure concerns
+          - Only 'medium' or 'low' scanner findings
+          - Quasi-identifiers that could potentially re-identify (PRIVACY)
+          - Large output volumes that are hard to audit
           → Set confidence_score 0.6-0.8
 
         ============================================================
-        WHAT YOU MUST NOT DO
+        IMPORTANT DISTINCTIONS
         ============================================================
 
-        - Do NOT invent findings that the automated scanners did not report
-        - Do NOT flag standard research patterns as threats:
-          * Importing from `generated.models` (Epsilon SDK) is ALWAYS safe
-          * Using print() to display analysis results is NORMAL
-          * Accessing patient data fields (age, heart_rate, etc.) is the PURPOSE
-          * Writing CSV/JSON output files is expected behavior
-        - Do NOT reject code just because it accesses patient data — that is
-          literally what the research platform exists for
+        - ACCESSING PII for computation is ALLOWED (groupby, filter, aggregate)
+        - RETURNING PII in output is NOT ALLOWED (the output leaves the enclave)
+        - Importing from `generated.models` (Epsilon SDK) is ALWAYS safe
+        - The question is: does the OUTPUT contain individual-level PII?
 
         ============================================================
         OUTPUT

@@ -133,7 +133,21 @@ class TestBaseWorker:
         mock_job_repository.update_job_status.assert_called_with(
             job_id='JOB-EXC',
             status='failed',
-            error_message='Processing failed'
+            error_message='Processing failed',
+            release_status='not_required',
+        )
+
+    def test_update_job_failed_needs_no_release_review(self, concrete_worker, mock_job_repository):
+        """Clone and AI-worker failures carry no real-data text: release_status is not_required."""
+        concrete_worker._job_logger = MagicMock()
+
+        concrete_worker._update_job_failed('JOB-CLONE', 'git clone failed: repository not found')
+
+        mock_job_repository.update_job_status.assert_called_once_with(
+            job_id='JOB-CLONE',
+            status='failed',
+            error_message='git clone failed: repository not found',
+            release_status='not_required',
         )
 
     def test_health_check_calls_fetch_jobs(self, concrete_worker, mock_job_repository):
