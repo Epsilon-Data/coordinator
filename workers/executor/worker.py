@@ -184,11 +184,14 @@ class ExecutorWorker(ExecutorWorkerBase):
                     "error": "No attestation_document found in attestation payload",
                 })
 
+            skip_cert = os.environ.get("USE_LOCAL_ENCLAVE", "false").lower() in ("true", "1", "yes")
             vr = verify_attestation(
                 attestation_doc=b64_doc,
                 expected_pcr0=os.environ.get("EXPECTED_PCR0"),
                 expected_pcr1=os.environ.get("EXPECTED_PCR1"),
                 expected_pcr2=os.environ.get("EXPECTED_PCR2"),
+                skip_certificate_verification=skip_cert,
+                allow_expired=skip_cert,
             )
 
             return json.dumps({
