@@ -1,0 +1,19 @@
+# Secret scanning config — extends gitleaks' default rules.
+# CI scans new commits (see .github/workflows/gitleaks.yml); the pre-commit hook
+# scans staged changes. Only allowlist paths that can never carry real secrets.
+title = "epsilon"
+
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''(^|/)dist/''',
+  '''(^|/)build/''',
+  '''(^|/)\.yarn/releases/''',
+  '''package-lock\.json$''',
+  '''pnpm-lock\.yaml$''',
+  '''yarn\.lock$''',
+  '''poetry\.lock$''',
+  '''\.min\.js$''',
+]
