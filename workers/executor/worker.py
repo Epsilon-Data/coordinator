@@ -2,6 +2,7 @@
 Executor worker implementing high-level logic:
 fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
 """
+import base64
 import json
 import os
 import sys
@@ -9,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 try:
     from epsilon_verifier import verify_attestation
@@ -17,6 +18,7 @@ except ImportError:
     verify_attestation = None
 
 from shared.db import db, job_repository
+from shared.db.models import JobRequest
 from shared.base_worker import ExecutorWorkerBase
 from workers.executor.utils import get_logger, setup_logging
 from workers.executor.interfaces import IExecutor
@@ -185,8 +187,6 @@ class ExecutorWorker(ExecutorWorkerBase):
         """
         logger = get_logger(__name__)
         try:
-            from shared.db.models import JobRequest
-            from sqlalchemy import select
             with db.get_session() as session:
                 orphaned = session.execute(
                     select(JobRequest).where(JobRequest.status == 'executing')
@@ -203,8 +203,6 @@ class ExecutorWorker(ExecutorWorkerBase):
         """Requeue jobs stuck in 'executing' longer than the stale threshold."""
         logger = get_logger(__name__)
         try:
-            from shared.db.models import JobRequest
-            from sqlalchemy import select
             cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._stale_after_seconds)
             with db.get_session() as session:
                 stale = session.execute(
@@ -378,8 +376,6 @@ class ExecutorWorker(ExecutorWorkerBase):
         job_id for jobs that did not run Step 4b.
         """
         try:
-            import base64
-
             # Extract the raw attestation document bytes
             att_doc = attestation
             if isinstance(att_doc, str):
