@@ -103,6 +103,22 @@ class TestAIAgentWorker:
         call_kwargs = mock_job_repository.update_job_ai_results.call_args[1]
         assert call_kwargs["ai_decision"] == "ai_error"
 
+    @pytest.mark.parametrize("outcome", ["ai_rejected", "ai_error"])
+    @patch("workers.ai_agent.ai_agent_worker.analyze_repository")
+    def test_ai_outcome_never_changes_the_job_status(
+        self, mock_analyze, outcome, worker, sample_job, mock_job_repository, sample_rejected_decision
+    ):
+        """The AI review is advisory: a rejection or an AI error only writes AI metadata."""
+        if outcome == "ai_rejected":
+            mock_analyze.return_value = sample_rejected_decision
+        else:
+            mock_analyze.side_effect = Exception("Analysis crashed")
+
+        assert worker.process_job(sample_job) is True
+
+        assert mock_job_repository.update_job_ai_results.call_args[1]["ai_decision"] == outcome
+        mock_job_repository.update_job_status.assert_not_called()
+
     def test_save_analysis_result(self, worker, sample_analysis_decision):
         """Analysis results are saved as JSON."""
         path = worker._save_analysis_result("JOB-SAVE", sample_analysis_decision)

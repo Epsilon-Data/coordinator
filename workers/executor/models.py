@@ -61,6 +61,8 @@ class ExecutionResult(BaseModel):
     attestation: Optional[Dict[str, Any]] = Field(default=None, description="Enclave attestation document")
     step_timing: Optional[Dict[str, Any]] = Field(default=None, description="Per-step execution timing metrics")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # False only when the job failed before the data middleware or the enclave was contacted, so its error is platform text
+    real_data_contact: bool = Field(default=True, description="Whether real data was requested for this run")
 
     # ATL / JAC artifacts (sprint A5). Present when ATL_ENABLED and the job
     # made it through commitment-then-dispatch. Carried through to worker.py

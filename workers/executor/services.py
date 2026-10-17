@@ -21,6 +21,7 @@ from cryptography.exceptions import InvalidTag
 
 from workers.executor.models import BuildConfig, DatasetConfig
 from workers.executor.exceptions import BuildValidationError
+from workers.executor.utils import canonical_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class BuildValidator:
 
     REQUIRED_FOLDERS = ["build", "build/generated"]
     REQUIRED_FILES = ["build/build.yml"]
+    MAX_ARCHETYPE_ID_LENGTH = 255  # job_requests.archetype_id is varchar(255)
 
     def __init__(self, repo_path: str):
         self.repo_path = Path(repo_path)
@@ -126,6 +128,22 @@ class BuildValidator:
             raise BuildValidationError(f"Invalid build.yml configuration: {e}", details={"error": str(e)})
 
     def _parse_datasets(self, datasets_data: list) -> list:
+        # A job analyses exactly one platform project: its held output goes to that
+        # project's reviewers, and the submitter's access to it is checked.
+        count = len(datasets_data) if isinstance(datasets_data, list) else 0
+        if count == 0:
+            raise BuildValidationError(
+                "build.yml must list exactly one dataset under 'datasets', but lists none. "
+                "Add the dataset of the project you analyse, then run the job again.",
+                details={"count": 0}
+            )
+        if count > 1:
+            raise BuildValidationError(
+                f"build.yml must list exactly one dataset under 'datasets', but lists {count}. "
+                "A job analyses one project: submit a separate job for each project.",
+                details={"count": count}
+            )
+
         datasets = []
         for idx, ds in enumerate(datasets_data):
             if not isinstance(ds, dict):
@@ -136,14 +154,27 @@ class BuildValidator:
 
             if not dataset_id:
                 raise BuildValidationError(f"Dataset at index {idx} missing 'dataset_id'", details={"index": idx})
+            project_id = canonical_uuid(dataset_id)
+            if project_id is None:
+                raise BuildValidationError(
+                    f"Dataset at index {idx}: 'dataset_id' must be the platform project id, a UUID "
+                    "such as 0f8fad5b-d9cb-469f-a165-70867728950e",
+                    details={"index": idx}
+                )
             if not archetype_id:
                 raise BuildValidationError(
                     f"Dataset at index {idx} missing 'archetype_id'",
-                    details={"index": idx, "dataset_id": dataset_id}
+                    details={"index": idx, "dataset_id": project_id}
+                )
+            if not isinstance(archetype_id, str) or len(archetype_id) > self.MAX_ARCHETYPE_ID_LENGTH:
+                raise BuildValidationError(
+                    f"Dataset at index {idx}: 'archetype_id' must be text of at most "
+                    f"{self.MAX_ARCHETYPE_ID_LENGTH} characters",
+                    details={"index": idx, "dataset_id": project_id}
                 )
 
             datasets.append(DatasetConfig(
-                dataset_id=dataset_id,
+                dataset_id=project_id,
                 archetype_id=archetype_id,
                 import_path=ds.get('import_path', ''),
                 function_name=ds.get('function_name', ''),

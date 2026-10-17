@@ -7,6 +7,7 @@ from typing import Optional
 from workers.executor.settings import Settings, get_settings
 from workers.executor.interfaces import IExecutor, IEnclaveClient, IMiddlewareClient
 from workers.executor.exceptions import ConfigurationError
+from workers.executor.access_client import ProjectAccessClient
 from workers.executor.clients import EnclaveClient, EnclaveClientLocal, EnclaveClientTDX, MiddlewareClient, ProxyClient
 from workers.executor.constants import EnclaveBackend
 from workers.executor.executor import SecureExecutor
@@ -142,7 +143,8 @@ class ExecutorFactory:
         settings: Optional[Settings] = None,
         enclave_client: Optional[IEnclaveClient] = None,
         middleware_client: Optional[IMiddlewareClient] = None,
-        proxy_client: Optional[ProxyClient] = None
+        proxy_client: Optional[ProxyClient] = None,
+        access_client: Optional[ProjectAccessClient] = None
     ) -> IExecutor:
         """
         Create a job executor with all dependencies.
@@ -152,6 +154,7 @@ class ExecutorFactory:
             enclave_client: Pre-configured enclave client (creates new if None)
             middleware_client: Pre-configured middleware client (creates new if None)
             proxy_client: Pre-configured proxy client (creates new if None and proxy enabled)
+            access_client: Pre-configured project access client (creates new if None)
 
         Returns:
             Configured job executor
@@ -169,6 +172,14 @@ class ExecutorFactory:
             if proxy_client is None:
                 proxy_client = ProxyClientFactory.create_client(settings)
 
+            if access_client is None:
+                access_client = ProjectAccessClient(settings.project_access)
+                if not settings.project_access.is_configured:
+                    logger.warning(
+                        "[ACCESS] EPSILON_API_URL or EPSILON_COORDINATOR_CLIENT_SECRET is not set: "
+                        "jobs fail before real data until the project access check is configured"
+                    )
+
             logger.info("Creating SecureExecutor with configured dependencies")
             logger.info(f"  - Enclave client: {type(enclave_client).__name__}")
             if middleware_client:
@@ -184,7 +195,8 @@ class ExecutorFactory:
                 enclave_client=enclave_client,
                 settings=settings,
                 middleware_client=middleware_client,
-                proxy_client=proxy_client
+                proxy_client=proxy_client,
+                access_client=access_client
             )
 
         except Exception as e:

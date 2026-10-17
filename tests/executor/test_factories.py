@@ -196,6 +196,34 @@ class TestExecutorFactory:
             assert 'proxy_client' in call_kwargs
             assert executor is mock_executor
 
+    def test_create_executor_creates_the_project_access_client(
+        self, mock_settings, mock_enclave_client, mock_middleware_client
+    ):
+        """The executor gets a project access client built from settings.project_access."""
+        with patch('workers.executor.factories.ProjectAccessClient') as MockAccessClient, \
+                patch('workers.executor.factories.SecureExecutor') as MockExecutor:
+            ExecutorFactory.create_executor(
+                settings=mock_settings,
+                enclave_client=mock_enclave_client,
+                middleware_client=mock_middleware_client
+            )
+
+            MockAccessClient.assert_called_once_with(mock_settings.project_access)
+            assert MockExecutor.call_args.kwargs['access_client'] is MockAccessClient.return_value
+
+    def test_create_executor_warns_when_the_access_check_is_not_configured(
+        self, mock_settings, mock_enclave_client, mock_middleware_client, caplog
+    ):
+        mock_settings.project_access.is_configured = False
+        with patch('workers.executor.factories.SecureExecutor'):
+            ExecutorFactory.create_executor(
+                settings=mock_settings,
+                enclave_client=mock_enclave_client,
+                middleware_client=mock_middleware_client
+            )
+
+        assert any('jobs fail before real data' in r.getMessage() for r in caplog.records)
+
     def test_create_executor_creates_enclave_client(self, mock_settings, mock_middleware_client):
         """Test that enclave client is created when not provided."""
         with patch('workers.executor.factories.EnclaveClientFactory') as MockEnclaveFactory:

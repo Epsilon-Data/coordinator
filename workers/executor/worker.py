@@ -3,8 +3,10 @@ Executor worker implementing high-level logic:
 fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
 """
 import base64
+import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,10 +19,10 @@ try:
 except ImportError:
     verify_attestation = None
 
-from shared.db import db, job_repository
+from shared.db import db, job_repository, HELD_ERROR_MESSAGE
 from shared.db.models import JobRequest
 from shared.base_worker import ExecutorWorkerBase
-from workers.executor.utils import get_logger, setup_logging
+from workers.executor.utils import get_logger, setup_logging, held_text_digest
 from workers.executor.interfaces import IExecutor
 from workers.executor.models import JobExecutionRequest, JobStatus
 from workers.executor.settings import get_settings, validate_and_raise
@@ -30,6 +32,14 @@ from workers.executor.atl_client import ATLClient
 from workers.executor.jac import sign_jac, compute_script_hash, compute_context_hash
 from workers.executor.constants import EnclaveBackend
 from workers.executor.tdx_verifier import verify_tdx_attestation
+
+# Held in place of a job's output or error text when that text could not be stored,
+# so the job still ends pending and a reviewer can act on it.
+UNSTORED_OUTPUT_MESSAGE = "The job's output or error text could not be stored ({error_type}). Re-run the job to get its output."
+
+# Verification receipt checks that make an attestation authentic. output_verified is not
+# one of them: it is also false on a genuine output mismatch, which the reviewer must see.
+AUTHENTICITY_CHECKS = ('syntax_valid', 'certificate_chain_valid', 'signature_valid', 'pcr_verified')
 
 
 def _atl_receipt_to_json(receipt: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -43,6 +53,50 @@ def _atl_receipt_to_json(receipt: Optional[Dict[str, Any]]) -> Optional[str]:
         return None
     safe = {k: (v.hex() if isinstance(v, (bytes, bytearray)) else v) for k, v in receipt.items()}
     return json.dumps(safe)
+
+
+def _platform_failure_fields(job: Dict[str, Any], error_message: Optional[str]) -> Dict[str, Any]:
+    """Fields for a failure before real data was requested.
+
+    A re-run of a job that already holds output, or whose release was decided, keeps
+    that output and its release status: only the job status changes.
+    """
+    if job.get('release_status') in (None, 'not_required'):
+        return {'error_message': error_message, 'release_status': 'not_required'}
+    return {}
+
+
+def _attested_input_hashes(checks: Dict[str, Any], dataset_hash: Any, context_hash: Any) -> Dict[str, Optional[str]]:
+    """dataset_hash and context_hash for the verification receipt, kept only from an authentic attestation.
+
+    context_hash covers the job's project id (jac.compute_context_hash) when ATL is on.
+    """
+    authentic = all(checks.get(name) is True for name in AUTHENTICITY_CHECKS)
+    return {
+        "dataset_hash": dataset_hash if authentic and isinstance(dataset_hash, str) and dataset_hash else None,
+        "context_hash": context_hash if authentic and isinstance(context_hash, str) and context_hash else None,
+    }
+
+
+def _attested_output_hash(verification_receipt: Optional[str]) -> Optional[str]:
+    """Output hash bound into the attestation, read from the verification receipt (lower-case hex).
+
+    None unless the receipt shows an authentic attestation (AUTHENTICITY_CHECKS all true).
+    """
+    if not verification_receipt:
+        return None
+    try:
+        receipt = json.loads(verification_receipt)
+        checks = receipt.get("checks") or {}
+        authentic = all(checks.get(name) is True for name in AUTHENTICITY_CHECKS)
+        output_hash = receipt.get("output_hash")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return None
+    if not authentic:
+        return None
+    if not isinstance(output_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", output_hash):
+        return None
+    return output_hash.lower()
 
 
 class ExecutorWorker(ExecutorWorkerBase):
@@ -259,8 +313,14 @@ class ExecutorWorker(ExecutorWorkerBase):
         logger.info("Creating production executor")
         return ExecutorFactory.create_executor(self._settings)
 
-    def _verify_attestation(self, job_id: str, attestation: Any, logger) -> Optional[str]:
-        """Verify attestation document and return a JSON verification receipt."""
+    def _verify_attestation(
+        self, job_id: str, attestation: Any, logger, expected_output: Optional[str] = None
+    ) -> Optional[str]:
+        """Verify attestation document and return a JSON verification receipt.
+
+        With expected_output, the Nitro verifier also checks the attested output
+        hash against it; the attested hash is recorded as output_hash.
+        """
         try:
             # Normalise to a dict and route to the backend-specific verifier.
             att_doc = attestation
@@ -268,7 +328,7 @@ class ExecutorWorker(ExecutorWorkerBase):
                 att_doc = json.loads(att_doc)
 
             if self._is_tdx_attestation(att_doc):
-                return self._verify_tdx_attestation(job_id, att_doc, logger)
+                return self._verify_tdx_attestation(job_id, att_doc, logger, expected_output=expected_output)
 
             if verify_attestation is None:
                 raise ImportError("epsilon_verifier not installed")
@@ -291,6 +351,7 @@ class ExecutorWorker(ExecutorWorkerBase):
             skip_cert = os.environ.get("USE_LOCAL_ENCLAVE", "false").lower() in ("true", "1", "yes")
             vr = verify_attestation(
                 attestation_doc=b64_doc,
+                expected_output=expected_output,
                 expected_pcr0=os.environ.get("EXPECTED_PCR0"),
                 expected_pcr1=os.environ.get("EXPECTED_PCR1"),
                 expected_pcr2=os.environ.get("EXPECTED_PCR2"),
@@ -298,21 +359,26 @@ class ExecutorWorker(ExecutorWorkerBase):
                 allow_expired=skip_cert,
             )
 
+            checks = {
+                "syntax_valid": vr.syntax_valid,
+                "certificate_chain_valid": vr.certificate_chain_valid,
+                "signature_valid": vr.aws_signature_valid,
+                "pcr_verified": vr.pcr_verified,
+                "output_verified": vr.output_verified,
+            }
+            user_data = vr.user_data if isinstance(vr.user_data, dict) else {}
             return json.dumps({
                 "verified_at": datetime.now(timezone.utc).isoformat(),
                 "valid": vr.valid,
-                "checks": {
-                    "syntax_valid": vr.syntax_valid,
-                    "certificate_chain_valid": vr.certificate_chain_valid,
-                    "signature_valid": vr.aws_signature_valid,
-                    "pcr_verified": vr.pcr_verified,
-                    "output_verified": vr.output_verified,
-                },
+                "checks": checks,
                 "pcrs": {"pcr0": vr.pcr0, "pcr1": vr.pcr1, "pcr2": vr.pcr2},
+                "output_hash": vr.output_hash,
+                **_attested_input_hashes(checks, user_data.get("dataset_hash"), user_data.get("context_hash")),
                 "module_id": vr.module_id,
                 "timestamp": vr.timestamp.isoformat() if vr.timestamp else None,
                 "verifier_version": "1.0.0",
-                "error": vr.error,
+                # A mismatch message carries the held output's hash, which is not public before release
+                "error": "Output hash mismatch" if (vr.error or "").startswith("Output hash mismatch") else vr.error,
                 "timing": vr.timing,
             })
         except Exception as e:
@@ -331,27 +397,32 @@ class ExecutorWorker(ExecutorWorkerBase):
         inner = att_doc.get("attestation", {})
         return isinstance(inner, dict) and inner.get("backend") == EnclaveBackend.TDX
 
-    def _verify_tdx_attestation(self, job_id: str, att_doc: Dict[str, Any], logger) -> str:
+    def _verify_tdx_attestation(
+        self, job_id: str, att_doc: Dict[str, Any], logger, expected_output: Optional[str] = None
+    ) -> str:
         """Verify a TDX attestation and return a JSON receipt (same shape as Nitro)."""
-        result = verify_tdx_attestation(att_doc)
+        result = verify_tdx_attestation(att_doc, expected_output=expected_output)
         if not result.valid and result.error:
             logger.warning(f"[ATTESTATION-TDX] {job_id}: {result.error}")
         measurements = result.measurements
+        checks = {
+            "syntax_valid": result.syntax_valid,
+            "certificate_chain_valid": result.certificate_chain_valid,
+            "signature_valid": result.signature_valid,
+            "pcr_verified": result.pcr_verified,
+            "output_verified": result.output_verified,
+        }
         return json.dumps({
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "valid": result.valid,
-            "checks": {
-                "syntax_valid": result.syntax_valid,
-                "certificate_chain_valid": result.certificate_chain_valid,
-                "signature_valid": result.signature_valid,
-                "pcr_verified": result.pcr_verified,
-                "output_verified": result.output_verified,
-            },
+            "checks": checks,
             "pcrs": {
                 "pcr0": measurements.get("mrtd"),
                 "pcr1": measurements.get("rtmr0"),
                 "pcr2": measurements.get("rtmr1"),
             },
+            "output_hash": result.output_hash,
+            **_attested_input_hashes(checks, result.dataset_hash, result.context_hash),
             "module_id": result.module_id,
             "verifier_version": "tdx-1.0.0",
             "error": result.error,
@@ -429,6 +500,10 @@ class ExecutorWorker(ExecutorWorkerBase):
         """
         job_id = job['job_id']
         logger = get_logger(__name__)
+        # Once dispatched, any output or error text may come from real data: it is
+        # held for review and never logged. Once completed, the job is not changed.
+        dispatched = False
+        completed = False
 
         try:
             logger.info(f"[JOB] ========== PROCESSING JOB {job_id} ==========")
@@ -475,14 +550,19 @@ class ExecutorWorker(ExecutorWorkerBase):
             )
 
             # Step 5: Execute using high-level logic (get public_key, zip, encrypt, send to enclave)
+            dispatched = True
             result = self._executor.execute(job_request)
 
             # Update job status based on result
             if result.is_success:
+                content = result.output or ""
+
                 # Verify attestation document if present
                 verification_receipt = None
                 if result.attestation:
-                    verification_receipt = self._verify_attestation(job_id, result.attestation, logger)
+                    verification_receipt = self._verify_attestation(
+                        job_id, result.attestation, logger, expected_output=content,
+                    )
 
                 # Submit to ATL if enabled and attestation is present. Pass
                 # the committed job_id so the HA entry pairs with the prior
@@ -510,14 +590,25 @@ class ExecutorWorker(ExecutorWorkerBase):
 
                 # Serialize ATL receipts to JSON-safe form (their inner
                 # `receipt` field is COSE_Sign1 raw bytes; hex-encode any
-                # bytes values so json.dumps in update_job_status succeeds).
+                # bytes values so the JSON column write succeeds).
                 commitment_receipt_json = _atl_receipt_to_json(result.commitment_receipt)
                 ha_receipt_json = _atl_receipt_to_json(result.ha_receipt)
 
-                job_repository.update_job_status(
-                    job_id=job_id,
+                # The output stays held even if it does not match the attested hash;
+                # the reviewer sees the mismatch.
+                attested_output_hash = _attested_output_hash(verification_receipt)
+                content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                if attested_output_hash and attested_output_hash != content_sha256:
+                    logger.warning(
+                        f"[ATTESTATION] Job {job_id}: attested output hash {attested_output_hash} "
+                        f"does not match the output hash {content_sha256}"
+                    )
+
+                held_result = dict(
                     status=JobStatus.SUCCESS.value,
-                    execution_result=result.output,
+                    kind='result',
+                    content=content,
+                    attested_output_hash=attested_output_hash,
                     attestation=result.attestation,
                     verification_receipt=verification_receipt,
                     execution_metrics=result.step_timing,
@@ -528,7 +619,14 @@ class ExecutorWorker(ExecutorWorkerBase):
                     commitment_receipt=commitment_receipt_json,
                     ha_receipt=ha_receipt_json,
                 )
-                logger.info(f"[SUCCESS] Job {job_id} completed")
+                try:
+                    job_repository.complete_job_with_held_output(job_id, **held_result)
+                except Exception as write_error:
+                    # A transient DB error must not cost the output: retry once in a new transaction
+                    logger.error(f"[ERROR] Could not hold the result for job {job_id}: {type(write_error).__name__}; retrying")
+                    job_repository.complete_job_with_held_output(job_id, **held_result)
+                completed = True
+                logger.info(f"[SUCCESS] Job {job_id} completed; output held for review ({held_text_digest(content)})")
                 if result.attestation:
                     logger.info(f"[ATTESTATION] Stored attestation for job {job_id}")
                 if verification_receipt:
@@ -536,47 +634,104 @@ class ExecutorWorker(ExecutorWorkerBase):
                 if atl_receipt:
                     logger.info(f"[ATL] Inclusion receipt stored for job {job_id}")
                 return True
-            elif result.status == JobStatus.REJECTED:
-                # Build validation failed - no build folder or invalid build.yml
-                job_repository.update_job_status(
-                    job_id=job_id,
-                    status=JobStatus.REJECTED.value,
-                    error_message=result.error
-                )
-                logger.warning(f"[REJECTED] Job {job_id} rejected: {result.error}")
-                return False
-            else:
-                # Submit Low-Assurance failure entry to ATL
-                if self._atl_client:
-                    error_class = result.status.value if result.status else "unknown"
+            elif result.status == JobStatus.REJECTED or not result.real_data_contact:
+                # Build validation failed (no build folder or invalid build.yml), or the
+                # job failed before real data was requested: the error is platform text
+                # and is shown as is.
+                if result.status != JobStatus.REJECTED and self._atl_client:
                     self._atl_client.submit_la_entry(
                         job_id=job_id,
-                        error_class=error_class,
-                        error_detail=result.error or "unknown error",
+                        error_class=result.status.value,
+                        error_detail="",
+                    )
+                    logger.info(f"[ATL] Failure entry submitted for job {job_id}")
+                job_repository.update_job_status(
+                    job_id=job_id,
+                    status=result.status.value,
+                    **_platform_failure_fields(job, result.error),
+                )
+                completed = True
+                if result.status == JobStatus.REJECTED:
+                    logger.warning(f"[REJECTED] Job {job_id} rejected: {result.error}")
+                else:
+                    logger.error(f"[FAILED] Job {job_id} failed before real data was requested: {result.error}")
+                return False
+            else:
+                # Submit Low-Assurance failure entry to ATL. The error text may
+                # carry real-data values, so it never goes into the public log.
+                if self._atl_client:
+                    self._atl_client.submit_la_entry(
+                        job_id=job_id,
+                        error_class=result.status.value,
+                        error_detail="",
                     )
                     logger.info(f"[ATL] Failure entry submitted for job {job_id}")
 
-                job_repository.update_job_status(
-                    job_id=job_id,
+                job_repository.complete_job_with_held_output(
+                    job_id,
                     status=JobStatus.FAILED.value,
-                    error_message=result.error
+                    kind='error',
+                    content=result.error or "",
+                    error_message=HELD_ERROR_MESSAGE,
                 )
-                logger.error(f"[FAILED] Job {job_id} failed: {result.error}")
+                completed = True
+                logger.error(f"[FAILED] Job {job_id} failed; error held for review ({held_text_digest(result.error)})")
                 return False
 
         except Exception as e:
-            logger.error(f"[ERROR] Job {job_id} failed: {str(e)}")
+            if completed:
+                logger.error(
+                    f"[ERROR] Job {job_id}: {type(e).__name__} after the job was stored "
+                    f"({held_text_digest(str(e))}); job left unchanged"
+                )
+                return False
+            if dispatched:
+                logger.error(f"[ERROR] Job {job_id} failed after dispatch: {type(e).__name__} ({held_text_digest(str(e))})")
+            else:
+                logger.error(f"[ERROR] Job {job_id} failed: {str(e)}")
             # Submit LA entry for unexpected failures
             if self._atl_client:
                 try:
                     self._atl_client.submit_la_entry(
                         job_id=job_id,
                         error_class=type(e).__name__,
-                        error_detail=str(e),
+                        error_detail="",
                     )
                 except Exception:
                     pass
-            job_repository.update_job_status(job_id=job_id, status=JobStatus.FAILED.value, error_message=str(e))
+            if not dispatched:
+                job_repository.update_job_status(
+                    job_id=job_id,
+                    status=JobStatus.FAILED.value,
+                    **_platform_failure_fields(job, str(e)),
+                )
+                return False
+            # After dispatch nothing may escape: the poll loop would log the exception
+            # chain, which can carry the held text.
+            try:
+                job_repository.complete_job_with_held_output(
+                    job_id,
+                    status=JobStatus.FAILED.value,
+                    kind='error',
+                    content=str(e),
+                    error_message=HELD_ERROR_MESSAGE,
+                )
+            except Exception as hold_error:
+                logger.error(f"[ERROR] Could not hold the error for job {job_id}: {type(hold_error).__name__}")
+                try:
+                    job_repository.complete_job_with_held_output(
+                        job_id,
+                        status=JobStatus.FAILED.value,
+                        kind='error',
+                        content=UNSTORED_OUTPUT_MESSAGE.format(error_type=type(hold_error).__name__),
+                        error_message=HELD_ERROR_MESSAGE,
+                    )
+                except Exception as placeholder_error:
+                    # The job stays 'executing'; _recover_orphaned_jobs re-queues it on the next executor start.
+                    logger.error(
+                        f"[ERROR] Could not store anything for job {job_id}: {type(placeholder_error).__name__}; "
+                        "left executing"
+                    )
             return False
 
 

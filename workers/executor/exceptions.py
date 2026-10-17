@@ -37,6 +37,16 @@ class BuildValidationError(ExecutorError):
     pass
 
 
+class ProjectAccessError(ExecutorError):
+    """Raised when the job's project could not be recorded or its access check could not be completed."""
+    pass
+
+
+class ProjectAccessDeniedError(ExecutorError):
+    """Raised when the job's submitter may not analyse the job's project."""
+    pass
+
+
 # Enclave-specific exceptions
 class EnclaveError(ExecutorError):
     """Base exception for enclave-related errors."""
