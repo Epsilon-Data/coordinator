@@ -91,28 +91,56 @@ def create_analyzer_task(
         ```
 
         ============================================================
-        YOUR TASK
+        PII FIELDS IN THIS DATASET
+        ============================================================
+        The following fields are PII (Personally Identifiable Information):
+        {', '.join(pii_fields)}
+
+        ============================================================
+        YOUR TASK — TWO-PART ANALYSIS
         ============================================================
 
-        Based on the scanner results above:
+        PART 1: SECURITY ASSESSMENT (based on scanner results)
 
-        1. If AST scan found ZERO findings and output check found ZERO findings:
-           → The script is safe. State this clearly. Do not invent new findings.
-
-        2. If scanners found findings:
+        If AST scan found findings:
            → Assess whether each finding is a genuine threat or acceptable.
-           → Consider the context: this is a researcher analysis script running
-             in a Trusted Execution Environment (AWS Nitro Enclave).
-           → The `generated.models` module is the Epsilon SDK's auto-generated
-             data loader — it is ALWAYS safe and expected.
-           → Printing analysis results (counts, statistics, field values) is
-             NORMAL behavior for research scripts.
+        If AST scan found ZERO findings:
+           → Confirm no security threats detected.
 
-        3. Provide your assessment as a structured summary that the Decision
-           Agent can use.
+        The `generated.models` module is the Epsilon SDK's auto-generated
+        data loader — it is ALWAYS safe and expected.
 
-        CRITICAL RULE: Do NOT fabricate findings that the scanners did not report.
-        If the scanners say "no findings", your answer must confirm the script is safe.
+        PART 2: DATA PRIVACY ASSESSMENT (based on source code review)
+
+        Even if the AST scanner found no security issues, you MUST review
+        the source code for DATA PRIVACY violations. The AST scanner does
+        NOT check for PII leakage — that is YOUR responsibility.
+
+        REJECT the script if it does ANY of the following:
+          - Returns individual-level PII fields (name, email, phone, address,
+            date_of_birth, patient_id, ssn, medical_record_number) in the
+            output dict or printed output
+          - Returns raw records (e.g., df.to_dict(), df.to_records()) that
+            include PII columns
+          - Prints individual patient records with identifying information
+          - Writes raw patient data to files
+          - Returns aggregations on groups smaller than 5 (k-anonymity violation)
+          - Concatenates PII fields (e.g., first_name + last_name)
+          - Returns quasi-identifiers that could re-identify individuals
+            (e.g., exact age + zipcode + gender combined)
+
+        APPROVE the script if it ONLY returns:
+          - Aggregate statistics (counts, means, medians, std) on non-PII fields
+          - Model coefficients, feature importances, accuracy scores
+          - Group-level summaries where each group has N >= 5
+          - Plots or visualizations of aggregate data
+
+        IMPORTANT: Accessing PII fields for COMPUTATION is fine (e.g.,
+        groupby age, filter by gender). The violation is RETURNING or
+        PRINTING PII values in the output.
+
+        Provide your assessment as a structured summary covering BOTH
+        security AND data privacy for the Decision Agent.
         """,
         agent=agent,
         expected_output="Assessment of scanner findings: confirm safety if no findings, or explain genuine threats if findings exist"
