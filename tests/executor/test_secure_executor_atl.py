@@ -34,7 +34,7 @@ def mock_enclave_client():
     client = MagicMock()
     client.get_public_key.return_value = ('pubkey-pem', 'session_123')
     client.encrypt_zip_data.return_value = 'encrypted_zip_base64'
-    client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None)
+    client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None, None)
     client.health_check.return_value = True
     client.enclave_cid = 1
     return client

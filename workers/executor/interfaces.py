@@ -11,6 +11,11 @@ from workers.executor.constants import MiddlewareModes
 from workers.executor.models import JobExecutionRequest, ExecutionResult
 
 
+# (success, output or error text, attestation, output_files). output_files is the enclave's
+# {'files': [...], 'files_manifest_sha256': ...}, or None when its response has no files key.
+EnclaveExecution = Tuple[bool, str, Optional[Dict], Optional[Dict]]
+
+
 @dataclass
 class ProxyResponse:
     """Response from proxy tunnel query."""
@@ -128,8 +133,8 @@ class IEnclaveClient(ABC):
         session_id: str,
         encrypted_zip: str,
         encrypted_csv: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[Dict]]:
-        """Send encrypted data to enclave. Returns (success, output/error, attestation)."""
+    ) -> EnclaveExecution:
+        """Send encrypted data to enclave. Returns (success, output/error, attestation, output_files)."""
         pass
 
     @abstractmethod
@@ -139,8 +144,8 @@ class IEnclaveClient(ABC):
         encrypted_zip: str,
         encrypted_credentials: str,
         sql_query: str
-    ) -> Tuple[bool, str, Optional[Dict]]:
-        """Send encrypted data to enclave with direct DB fetch. Returns (success, output/error, attestation)."""
+    ) -> EnclaveExecution:
+        """Send encrypted data to enclave with direct DB fetch. Returns (success, output/error, attestation, output_files)."""
         pass
 
     @abstractmethod

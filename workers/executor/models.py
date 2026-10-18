@@ -59,6 +59,9 @@ class ExecutionResult(BaseModel):
     logs: Optional[str] = Field(default=None, description="Execution logs")
     enclave_cid: Optional[int] = Field(default=None, description="Enclave CID used")
     attestation: Optional[Dict[str, Any]] = Field(default=None, description="Enclave attestation document")
+    # The enclave's {'files': [...], 'files_manifest_sha256': ...} (file bytes base64); None when its
+    # response had no files key. Verified and stored by the worker, never serialised with the result.
+    output_files: Optional[Dict[str, Any]] = Field(default=None, description="Files the run wrote, unverified")
     step_timing: Optional[Dict[str, Any]] = Field(default=None, description="Per-step execution timing metrics")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     # False only when the job failed before the data middleware or the enclave was contacted, so its error is platform text

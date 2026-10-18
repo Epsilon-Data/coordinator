@@ -28,7 +28,7 @@ try:
 except ImportError:
     generate_local_attestation = None
 
-from workers.executor.interfaces import IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
+from workers.executor.interfaces import EnclaveExecution, IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
 from workers.executor.services import CryptoService
 from workers.executor.exceptions import EnclaveConnectionError
 from workers.executor.settings import get_settings, ProxyConfig
@@ -69,6 +69,13 @@ HTTP_RETRY_BASE_DELAY = 1.0  # seconds
 SCRIPT_TIMEOUT_SECONDS = _safe_int_env('SCRIPT_TIMEOUT_SECONDS', 60, min_val=1, max_val=3600)
 BUILD_YML_PATH = 'build.yml'
 CSV_OUTPUT_PATH = 'generated/data.csv'
+
+
+def _output_files(response: dict) -> Optional[Dict]:
+    """The response's files and their manifest hash, or None when it has no `files` key (an older enclave)."""
+    if 'files' not in response:
+        return None
+    return {'files': response['files'], 'files_manifest_sha256': response.get('files_manifest_sha256')}
 
 
 # =============================================================================
@@ -121,7 +128,7 @@ class EnclaveClient(IEnclaveClient):
         encrypted_csv: Optional[str] = None,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
-    ) -> Tuple[bool, str, Optional[Dict]]:
+    ) -> EnclaveExecution:
         """Send encrypted data to enclave for execution.
 
         When atl_nonce / atl_context_hash are provided (commitment-then-dispatch
@@ -130,7 +137,7 @@ class EnclaveClient(IEnclaveClient):
         in-JSON problem on the VSock RPC.
 
         Returns:
-            Tuple of (success, output, attestation_data)
+            Tuple of (success, output, attestation_data, output_files)
         """
         try:
             logger.info(f"[ENCLAVE] Sending data to enclave, session: {session_id[:20]}...")
@@ -169,16 +176,16 @@ class EnclaveClient(IEnclaveClient):
                 if enclave_timing and attestation is not None:
                     attestation['timing'] = enclave_timing
 
-                return True, response.get('output', ''), attestation
+                return True, response.get('output', ''), attestation, _output_files(response)
             else:
                 error_msg = response.get('error', 'Unknown error')
                 # The enclave's error text may carry real-data output; it is held for review
                 logger.error(f"[ENCLAVE] Execution failed ({held_text_digest(error_msg)})")
-                return False, error_msg, None
+                return False, error_msg, None, None
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Failed to send: {str(e)}", exc_info=True)
-            return False, str(e), None
+            return False, str(e), None, None
 
     def send_encrypted_data_with_db_fetch(
         self,
@@ -188,7 +195,7 @@ class EnclaveClient(IEnclaveClient):
         sql_query: str,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
-    ) -> Tuple[bool, str, Optional[Dict]]:
+    ) -> EnclaveExecution:
         """Send encrypted data to enclave for execution with direct DB fetch.
 
         The enclave will decrypt credentials, connect to the DB, fetch data,
@@ -199,7 +206,7 @@ class EnclaveClient(IEnclaveClient):
         can bind them into the hardware-signed user_data.
 
         Returns:
-            Tuple of (success, output, attestation_data)
+            Tuple of (success, output, attestation_data, output_files)
         """
         try:
             logger.info(f"[ENCLAVE] Sending data for DB fetch execution, session: {session_id[:20]}...")
@@ -235,15 +242,15 @@ class EnclaveClient(IEnclaveClient):
                 if enclave_timing and attestation is not None:
                     attestation['timing'] = enclave_timing
 
-                return True, response.get('output', ''), attestation
+                return True, response.get('output', ''), attestation, _output_files(response)
             else:
                 error_msg = response.get('error', 'Unknown error')
                 logger.error(f"[ENCLAVE] DB fetch execution failed ({held_text_digest(error_msg)})")
-                return False, error_msg, None
+                return False, error_msg, None, None
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Failed to send DB fetch request: {str(e)}", exc_info=True)
-            return False, str(e), None
+            return False, str(e), None, None
 
     def _send_to_enclave(self, request_data: dict) -> dict:
         """Send request to enclave via VSock."""
@@ -430,11 +437,11 @@ class EnclaveClientTDX(IEnclaveClient):
         encrypted_csv: Optional[str] = None,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
-    ) -> Tuple[bool, str, Optional[Dict]]:
+    ) -> EnclaveExecution:
         """Send encrypted data to the TDX agent for execution.
 
         Returns:
-            Tuple of (success, output/error, attestation_data).
+            Tuple of (success, output/error, attestation_data, output_files).
         """
         request = {
             'operation': EnclaveOperations.EXECUTE_SCRIPT,
@@ -457,7 +464,7 @@ class EnclaveClientTDX(IEnclaveClient):
         sql_query: str,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
-    ) -> Tuple[bool, str, Optional[Dict]]:
+    ) -> EnclaveExecution:
         """Send encrypted data to the TDX agent for execution with direct DB fetch."""
         request = {
             'operation': EnclaveOperations.EXECUTE_DB_FETCH,
@@ -472,24 +479,24 @@ class EnclaveClientTDX(IEnclaveClient):
             request['atl_context_hash'] = atl_context_hash.hex()
         return self._execute(request, session_id)
 
-    def _execute(self, request: dict, session_id: str) -> Tuple[bool, str, Optional[Dict]]:
-        """Send an execution request and normalise the (success, output, attestation) triple."""
+    def _execute(self, request: dict, session_id: str) -> EnclaveExecution:
+        """Send an execution request and normalise the (success, output, attestation, output_files) tuple."""
         try:
             logger.info(f"[TDX] Dispatching {request['operation']} (session: {session_id[:20]}...)")
             response = self._send_to_td(request)
             if not response.get('success'):
                 error_msg = response.get('error', 'Unknown error')
                 logger.error(f"[TDX] Execution failed ({held_text_digest(error_msg)})")
-                return False, error_msg, None
+                return False, error_msg, None, None
 
             attestation = response.get('attestation')
             enclave_timing = response.get('timing')
             if enclave_timing and attestation is not None:
                 attestation['timing'] = enclave_timing
-            return True, response.get('output', ''), attestation
+            return True, response.get('output', ''), attestation, _output_files(response)
         except Exception as e:
             logger.error(f"[TDX] Failed to send request: {e}", exc_info=True)
-            return False, str(e), None
+            return False, str(e), None, None
 
     def health_check(self) -> bool:
         try:
@@ -584,19 +591,19 @@ class EnclaveClientLocal(IEnclaveClient):
         encrypted_csv: Optional[str] = None,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
-    ) -> Tuple[bool, str, Optional[Dict]]:
+    ) -> EnclaveExecution:
         """Execute encrypted payloads with Zero Trust decryption.
 
         atl_nonce / atl_context_hash are accepted for interface parity and
         ignored: the local attestation is not bound to the ATL.
 
         Returns:
-            Tuple of (success, output, attestation_data) - attestation is None for local mode
+            Tuple of (success, output, attestation_data, output_files) - attestation is None for local mode
         """
         logger.info(f"[ENCLAVE] Starting Zero Trust execution (session: {session_id[:20]}...)")
 
         if session_id not in self._sessions:
-            return False, f"Session not found: {session_id}", None
+            return False, f"Session not found: {session_id}", None, None
 
         private_key = self._sessions[session_id]
 
@@ -614,11 +621,11 @@ class EnclaveClientLocal(IEnclaveClient):
 
             # Generate local attestation document for dev/testing
             attestation = self._generate_local_attestation(session_id, output, decrypted_zip, decrypted_csv)
-            return True, output, attestation
+            return True, output, attestation, None
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Execution failed: {e}", exc_info=True)
-            return False, str(e), None
+            return False, str(e), None, None
 
         finally:
             self._sessions.pop(session_id, None)
@@ -676,7 +683,7 @@ class EnclaveClientLocal(IEnclaveClient):
         encrypted_zip: str,
         encrypted_credentials: str,
         sql_query: str
-    ) -> Tuple[bool, str, Optional[Dict]]:
+    ) -> EnclaveExecution:
         """Local simulation of DB fetch execution.
 
         In local mode, we cannot actually connect to a DB via tap0.
@@ -687,7 +694,7 @@ class EnclaveClientLocal(IEnclaveClient):
         logger.info(f"[ENCLAVE-LOCAL] Would execute SQL: {sql_query[:100]}...")
 
         if session_id not in self._sessions:
-            return False, f"Session not found: {session_id}", None
+            return False, f"Session not found: {session_id}", None, None
 
         private_key = self._sessions[session_id]
 
@@ -695,10 +702,10 @@ class EnclaveClientLocal(IEnclaveClient):
             # Decrypt ZIP and execute without CSV (local simulation)
             decrypted_zip = self._crypto.decrypt(encrypted_zip, private_key)
             output = self._execute_script(decrypted_zip)
-            return True, output, None
+            return True, output, None, None
         except Exception as e:
             logger.error(f"[ENCLAVE-LOCAL] DB fetch execution failed: {e}", exc_info=True)
-            return False, str(e), None
+            return False, str(e), None, None
         finally:
             self._sessions.pop(session_id, None)
 
