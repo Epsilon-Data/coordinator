@@ -11,6 +11,7 @@ import base64
 import binascii
 import hashlib
 import os
+import stat
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -124,6 +125,48 @@ def verify_output_files(
         if attested_manifest_sha256 != digest:
             raise _reject("the files manifest hash does not match the attestation")
     return VerifiedOutputFiles(files=sorted(files, key=lambda f: f.name), manifest_sha256=digest)
+
+
+def collect_output_files(output_dir: str, max_files: int, max_total_bytes: int) -> Dict[str, Any]:
+    """The files a script left in output_dir, as an enclave response carries them (local enclave).
+
+    Returns {'files': [{name, size, sha256, type, content_b64}] in manifest order,
+    'files_manifest_sha256'}. A missing or empty directory means no files. Only regular
+    files directly in output_dir are allowed; the name, type and limit rules are those
+    verify_output_files applies to an enclave response. Raises OutputFilesError.
+    """
+    entries = []
+    if os.path.lexists(output_dir):
+        if os.path.islink(output_dir) or not os.path.isdir(output_dir):
+            raise _reject("outputs is not a directory")
+        total = 0
+        try:
+            for entry in sorted(os.scandir(output_dir), key=lambda e: e.name):
+                mode = entry.stat(follow_symlinks=False).st_mode
+                if stat.S_ISLNK(mode):
+                    raise _reject(f"symlink not allowed: {entry.name!r}")
+                if stat.S_ISDIR(mode):
+                    raise _reject(f"subdirectory not allowed: {entry.name!r}")
+                if not stat.S_ISREG(mode):
+                    raise _reject(f"not a regular file: {entry.name!r}")
+                fd = os.open(entry.path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                with os.fdopen(fd, 'rb') as f:
+                    # Never read past the limit; a larger total is rejected below
+                    content = f.read(max(max_total_bytes - total, 0) + 1)
+                total += len(content)
+                entries.append({
+                    'name': entry.name, 'size': len(content), 'sha256': hashlib.sha256(content).hexdigest(),
+                    'type': file_type(entry.name), 'content_b64': base64.b64encode(content).decode(),
+                })
+        except OSError as e:
+            raise _reject(str(e)) from None
+
+    payload = {'files': entries, 'files_manifest_sha256': manifest_sha256(build_manifest(entries))}
+    verify_output_files(
+        payload, attestation_present=False, attested_manifest_sha256=None,
+        max_files=max_files, max_total_bytes=max_total_bytes,
+    )
+    return payload
 
 
 def storage_key(job_id: str, sha256: str) -> str:

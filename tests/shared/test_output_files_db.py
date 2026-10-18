@@ -3,7 +3,11 @@
 Needs TEST_DATABASE_URL like test_release_gate_db, whose database helpers it reuses.
 """
 import hashlib
+import io
+import json
 import os
+import zipfile
+from unittest.mock import MagicMock, patch
 
 import psycopg2
 import pytest
@@ -13,6 +17,11 @@ from sqlalchemy.exc import DBAPIError
 
 from shared.db import Database, JobRepository
 from shared.output_manifest import build_manifest, manifest_sha256
+from workers.executor.clients import EnclaveClientLocal
+from workers.executor.executor import SecureExecutor
+from workers.executor.output_files import LocalOutputFileStore
+from workers.executor.settings import OutputFilesConfig
+from workers.executor.worker import ExecutorWorker
 from tests.shared.test_release_gate_db import (  # noqa: F401 (gate_db, repo and engine are fixtures)
     ALICE,
     BASE_REVISION,
@@ -32,6 +41,11 @@ from tests.shared.test_release_gate_db import (  # noqa: F401 (gate_db, repo and
     gate_db,
     repo,
 )
+
+try:
+    from epsilon_verifier import verify_attestation
+except ImportError:
+    verify_attestation = None
 
 TEST_DATABASE_URL = os.environ.get('TEST_DATABASE_URL')
 
@@ -295,3 +309,79 @@ class TestMigration:
                 assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': FILES_REVISION}]
             finally:
                 database.close()
+
+
+LOCAL_SCRIPT = (
+    "import os\n"
+    "out = os.environ['EPSILON_OUTPUT_DIR']\n"
+    "open(os.path.join(out, 'table.csv'), 'w').write('group,n\\na,7\\n')\n"
+    "open(os.path.join(out, 'chart.png'), 'wb').write(b'PNG')\n"
+    "print('count=7')\n"
+)
+
+
+def _verify_local_attestation(*args, allow_expired=False, **kwargs):
+    # The installed verifier may predate allow_expired; the local certificate is fresh anyway
+    return verify_attestation(*args, **kwargs)
+
+
+@pytest.mark.skipif(verify_attestation is None, reason='epsilon_verifier is not installed')
+class TestLocalEnclaveRun:
+    """A run on the local enclave (USE_LOCAL_ENCLAVE=true) holds its files like a real enclave run."""
+
+    @pytest.fixture
+    def worker(self, tmp_path, monkeypatch):
+        monkeypatch.setenv('USE_LOCAL_ENCLAVE', 'true')
+        settings = MagicMock()
+        settings.storage.shared_storage_path = str(tmp_path / 'storage')
+        settings.output_files = OutputFilesConfig(store='local', directory=str(tmp_path / 'files'))
+        with patch('workers.executor.clients.get_settings', return_value=settings):
+            client = EnclaveClientLocal()
+        executor = SecureExecutor.__new__(SecureExecutor)
+        executor._active_jobs = {}
+        executor._enclave_client = client
+        executor._log = MagicMock()
+
+        def execute(request):
+            bundle = io.BytesIO()
+            with zipfile.ZipFile(bundle, 'w') as zf:
+                zf.writestr('build.yml', 'analysis:\n  script_file: main.py\n')
+                zf.writestr('main.py', LOCAL_SCRIPT)
+            public_key, session_id = client.get_public_key(request.job_id)
+            success, output, attestation, files = client.send_encrypted_data_to_enclave(
+                session_id, client.encrypt_zip_data(bundle.getvalue(), public_key),
+            )
+            return executor._create_result(request.job_id, success, output, 1.0, attestation, {}, files)
+
+        worker = ExecutorWorker.__new__(ExecutorWorker)
+        worker._settings = settings
+        worker._output_file_store = LocalOutputFileStore(settings.output_files.directory)
+        worker._executor = MagicMock(is_ready=True, execute=MagicMock(side_effect=execute))
+        worker._atl_client = None
+        return worker
+
+    def test_the_files_are_stored_and_held_with_the_attested_manifest(self, repo, engine, worker, tmp_path):
+        job_id = _new_job(engine, 'JOB-F-LOCAL')
+        (tmp_path / 'storage' / 'repositories' / job_id).mkdir(parents=True)
+        job = {
+            'job_id': job_id, 'workspace_id': WS_ALICE, 'user_id': ALICE, 'researcher_nonce': None,
+            'commit_sha': 'c0ffee', 'github_repo': 'alice/analysis', 'github_branch': 'main',
+            'commit_message': 'run', 'commit_author': 'alice', 'created_at': '2026-10-18T00:00:00',
+        }
+
+        with patch('workers.executor.worker.job_repository', repo), \
+                patch('workers.executor.worker.verify_attestation', _verify_local_attestation):
+            assert worker.process_job(job) is True
+
+        table, chart = b'group,n\na,7\n', b'PNG'
+        files = [_file(job_id, 'chart.png', chart, 'image/png'), _file(job_id, 'table.csv', table)]
+        held = _held(engine, job_id)
+        assert (held['kind'], held['content']) == ('result', 'count=7\n')
+        assert held['files_manifest_sha256'] == _manifest(files)
+        assert _file_rows(engine, job_id) == files
+        for f, data in zip(files, (chart, table)):
+            assert (tmp_path / 'files' / f['storage_key']).read_bytes() == data
+        row = _job(engine, job_id)
+        assert row['status'] == 'success'
+        receipt = json.loads(row['verification_receipt'])
+        assert (receipt['valid'], receipt['files_manifest_sha256']) == (True, _manifest(files))

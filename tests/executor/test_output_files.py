@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import io
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from workers.executor.output_files import (
     OutputFileIntegrityError,
     OutputFilesError,
     S3OutputFileStore,
+    collect_output_files,
     output_file_store,
     storage_key,
     store_output_files,
@@ -167,6 +169,53 @@ class TestVerifyOutputFiles:
     def test_malformed_file_lists_are_rejected(self, payload):
         with pytest.raises(OutputFilesError, match='^Output files rejected: '):
             _verify(payload, attested=None)
+
+
+class TestCollectOutputFiles:
+    """The local enclave's collection of the files a script wrote, under the enclave's rules."""
+
+    def _collect(self, path, **limits):
+        return collect_output_files(str(path), **{**LIMITS, **limits})
+
+    def test_files_come_back_as_an_enclave_response_carries_them(self, tmp_path):
+        (tmp_path / 'summary.csv').write_bytes(SUMMARY)
+        (tmp_path / 'notes.txt').write_bytes(NOTES)
+
+        payload = self._collect(tmp_path)
+
+        assert payload == _payload([_entry('notes.txt', NOTES), _entry('summary.csv', SUMMARY)])
+        assert payload['files_manifest_sha256'] == KAT_MANIFEST_SHA256
+
+    @pytest.mark.parametrize('make', [lambda p: None, lambda p: p.mkdir()], ids=['missing', 'empty'])
+    def test_a_missing_or_empty_directory_has_no_files(self, tmp_path, make):
+        make(tmp_path / 'outputs')
+        assert self._collect(tmp_path / 'outputs') == {'files': [], 'files_manifest_sha256': EMPTY_MANIFEST_SHA256}
+
+    def test_outputs_must_be_a_directory(self, tmp_path):
+        (tmp_path / 'outputs').write_bytes(b'x')
+        with pytest.raises(OutputFilesError, match='^Output files rejected: outputs is not a directory'):
+            self._collect(tmp_path / 'outputs')
+
+    @pytest.mark.parametrize('make, reason', [
+        (lambda p: os.symlink(p / 'notes.txt', p / 'link.txt'), 'symlink not allowed'),
+        (lambda p: (p / 'nested').mkdir(), 'subdirectory not allowed'),
+        (lambda p: os.mkfifo(p / 'pipe.txt'), 'not a regular file'),
+        (lambda p: (p / 'run.sh').write_bytes(b'x'), 'extension not allowed'),
+        (lambda p: (p / '.hidden.txt').write_bytes(b'x'), 'invalid name'),
+    ])
+    def test_entries_breaking_the_rules_are_rejected(self, tmp_path, make, reason):
+        (tmp_path / 'notes.txt').write_bytes(NOTES)
+        make(tmp_path)
+        with pytest.raises(OutputFilesError, match=f'^Output files rejected: .*{reason}'):
+            self._collect(tmp_path)
+
+    def test_limits_are_enforced(self, tmp_path):
+        (tmp_path / 'a.txt').write_bytes(b'x' * 6)
+        (tmp_path / 'b.txt').write_bytes(b'y' * 5)
+        with pytest.raises(OutputFilesError, match='2 files, at most 1'):
+            self._collect(tmp_path, max_files=1)
+        with pytest.raises(OutputFilesError, match='exceed 10 bytes'):
+            self._collect(tmp_path, max_total_bytes=10)
 
 
 class TestLocalStore:

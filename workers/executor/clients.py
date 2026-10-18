@@ -31,6 +31,7 @@ except ImportError:
 from workers.executor.interfaces import EnclaveExecution, IEnclaveClient, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyResponse
 from workers.executor.services import CryptoService
 from workers.executor.exceptions import EnclaveConnectionError
+from workers.executor.output_files import collect_output_files
 from workers.executor.settings import get_settings, ProxyConfig
 from workers.executor.constants import EnclaveOperations, MiddlewareModes
 from workers.executor.utils import held_text_digest
@@ -69,6 +70,8 @@ HTTP_RETRY_BASE_DELAY = 1.0  # seconds
 SCRIPT_TIMEOUT_SECONDS = _safe_int_env('SCRIPT_TIMEOUT_SECONDS', 60, min_val=1, max_val=3600)
 BUILD_YML_PATH = 'build.yml'
 CSV_OUTPUT_PATH = 'generated/data.csv'
+OUTPUT_DIR_NAME = 'outputs'
+MPL_CONFIG_DIR_NAME = '.mplconfig'
 
 
 def _output_files(response: dict) -> Optional[Dict]:
@@ -616,12 +619,15 @@ class EnclaveClientLocal(IEnclaveClient):
                 decrypted_csv = self._crypto.decrypt(encrypted_csv, private_key)
                 logger.debug(f"CSV decrypted: {len(decrypted_csv)} bytes")
 
-            output = self._execute_script(decrypted_zip, decrypted_csv)
+            output, output_files = self._execute_script(decrypted_zip, decrypted_csv)
             logger.info("[ENCLAVE] Execution completed successfully")
 
             # Generate local attestation document for dev/testing
-            attestation = self._generate_local_attestation(session_id, output, decrypted_zip, decrypted_csv)
-            return True, output, attestation, None
+            attestation = self._generate_local_attestation(
+                session_id, output, decrypted_zip, decrypted_csv,
+                files_manifest_sha256=output_files['files_manifest_sha256'] if output_files else None,
+            )
+            return True, output, attestation, output_files
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Execution failed: {e}", exc_info=True)
@@ -635,22 +641,30 @@ class EnclaveClientLocal(IEnclaveClient):
         session_id: str,
         output: str,
         decrypted_zip: Optional[bytes] = None,
-        decrypted_csv: Optional[bytes] = None
+        decrypted_csv: Optional[bytes] = None,
+        files_manifest_sha256: Optional[str] = None,
     ) -> Optional[Dict]:
-        """Generate a local attestation document after successful execution."""
+        """Generate a local attestation document after successful execution.
+
+        files_manifest_sha256 is bound into user_data when the script ran successfully
+        (the hash of [] when it wrote no files), as the real enclave does.
+        """
         try:
             # Build user_data hash bundle (same structure as real enclave)
             script_hash = hashlib.sha256(decrypted_zip).hexdigest() if decrypted_zip else ""
             dataset_hash = hashlib.sha256(decrypted_csv).hexdigest() if decrypted_csv else ""
             output_hash = hashlib.sha256(output.encode()).hexdigest()
 
-            user_data = json.dumps({
+            proof = {
                 "job_id": session_id.replace("local_session_", ""),
                 "script_hash": script_hash,
                 "dataset_hash": dataset_hash,
                 "output_hash": output_hash,
                 "timestamp": int(time.time()),
-            }).encode()
+            }
+            if files_manifest_sha256 is not None:
+                proof["files_manifest_sha256"] = files_manifest_sha256
+            user_data = json.dumps(proof).encode()
 
             if generate_local_attestation is None:
                 raise ImportError("local_attestation module not available (cbor2 not installed)")
@@ -701,16 +715,20 @@ class EnclaveClientLocal(IEnclaveClient):
         try:
             # Decrypt ZIP and execute without CSV (local simulation)
             decrypted_zip = self._crypto.decrypt(encrypted_zip, private_key)
-            output = self._execute_script(decrypted_zip)
-            return True, output, None, None
+            output, output_files = self._execute_script(decrypted_zip)
+            return True, output, None, output_files
         except Exception as e:
             logger.error(f"[ENCLAVE-LOCAL] DB fetch execution failed: {e}", exc_info=True)
             return False, str(e), None, None
         finally:
             self._sessions.pop(session_id, None)
 
-    def _execute_script(self, zip_data: bytes, csv_data: Optional[bytes] = None) -> str:
-        """Extract ZIP, replace CSV, and execute script."""
+    def _execute_script(self, zip_data: bytes, csv_data: Optional[bytes] = None) -> Tuple[str, Optional[Dict]]:
+        """Extract ZIP, replace CSV, and execute script.
+
+        Returns (output, output_files); output_files is set only when the script ran
+        successfully (see _run_script).
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
@@ -732,11 +750,11 @@ class EnclaveClientLocal(IEnclaveClient):
 
             script_file = self._get_script_from_build_yml(temp_path)
             if not script_file:
-                return "No build.yml found or script_file not specified"
+                return "No build.yml found or script_file not specified", None
 
             script_path = temp_path / script_file
             if not script_path.exists():
-                return f"Script file not found: {script_file}"
+                return f"Script file not found: {script_file}", None
 
             return self._run_script(script_path, temp_path)
 
@@ -767,9 +785,23 @@ class EnclaveClientLocal(IEnclaveClient):
             logger.error(f"Failed to read build.yml: {e}")
             return None
 
-    def _run_script(self, script_path: Path, cwd: Path) -> str:
-        """Execute Python script and capture output."""
+    def _run_script(self, script_path: Path, cwd: Path) -> Tuple[str, Optional[Dict]]:
+        """Execute Python script and capture output and the files it writes.
+
+        As in the enclave, the script writes files to EPSILON_OUTPUT_DIR (<cwd>/outputs),
+        collected after a successful run into the enclave response's files and
+        files_manifest_sha256. A rule violation raises OutputFilesError, failing the run.
+        """
         logger.info(f"Executing: {script_path.name}")
+
+        output_dir = cwd / OUTPUT_DIR_NAME
+        output_dir.mkdir(exist_ok=True)
+        mpl_config_dir = cwd / MPL_CONFIG_DIR_NAME
+        mpl_config_dir.mkdir(exist_ok=True)
+        env = dict(os.environ)
+        env['EPSILON_OUTPUT_DIR'] = str(output_dir)
+        env['MPLBACKEND'] = 'Agg'
+        env['MPLCONFIGDIR'] = str(mpl_config_dir)
 
         try:
             result = subprocess.run(
@@ -777,23 +809,29 @@ class EnclaveClientLocal(IEnclaveClient):
                 capture_output=True,
                 text=True,
                 timeout=SCRIPT_TIMEOUT_SECONDS,
-                cwd=str(cwd)
+                cwd=str(cwd),
+                env=env,
             )
 
             if result.returncode == 0:
                 output = result.stdout
                 if result.stderr:
                     output += f"\n--- STDERR ---\n{result.stderr}"
-                return output
+                limits = self._settings.output_files
+                output_files = collect_output_files(
+                    str(output_dir), limits.max_files, limits.max_total_mb * 1024 * 1024
+                )
+                logger.info(f"Collected {len(output_files['files'])} output file(s)")
+                return output, output_files
 
             return (
                 f"Script failed (exit code {result.returncode})\n"
                 f"STDOUT: {result.stdout}\n"
                 f"STDERR: {result.stderr}"
-            )
+            ), None
 
         except subprocess.TimeoutExpired:
-            return f"Script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds"
+            return f"Script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds", None
 
     def health_check(self) -> bool:
         return True

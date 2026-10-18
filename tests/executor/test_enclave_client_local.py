@@ -1,6 +1,9 @@
 """
 Tests for workers/executor/clients.py - EnclaveClientLocal
 """
+import base64
+import hashlib
+import json
 import zipfile
 import tempfile
 from pathlib import Path
@@ -8,7 +11,31 @@ from io import BytesIO
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
+from shared.output_manifest import build_manifest, manifest_sha256
 from workers.executor.clients import EnclaveClientLocal
+from workers.executor.settings import OutputFilesConfig
+
+EMPTY_MANIFEST_SHA256 = manifest_sha256([])
+
+# Writes two files the way an analysis would, and prints the plotting environment it ran in
+FILES_SCRIPT = """
+import os
+out = os.environ['EPSILON_OUTPUT_DIR']
+print('backend=' + os.environ['MPLBACKEND'])
+print('mplconfig=' + str(os.path.isdir(os.environ['MPLCONFIGDIR'])))
+with open(os.path.join(out, 'table.csv'), 'w') as f:
+    f.write('group,n\\na,7\\n')
+with open(os.path.join(out, 'chart.png'), 'wb') as f:
+    f.write(b'\\x89PNG\\r\\n\\x1a\\n')
+"""
+
+
+def _bundle(script, script_file='main.py'):
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('build.yml', f'analysis:\n  script_file: {script_file}\n')
+        zf.writestr(script_file, script)
+    return buffer.getvalue()
 
 
 class TestEnclaveClientLocal:
@@ -18,6 +45,7 @@ class TestEnclaveClientLocal:
     def mock_settings(self):
         """Create mock settings."""
         settings = MagicMock()
+        settings.output_files = OutputFilesConfig()
         return settings
 
     @pytest.fixture
@@ -416,3 +444,93 @@ else:
         assert 'Loaded 3 rows' in output
         assert 'id' in output and 'name' in output
 
+
+
+class TestEnclaveClientLocalOutputFiles:
+    """The local enclave returns output files exactly as the real enclave's response does."""
+
+    @pytest.fixture
+    def settings(self):
+        settings = MagicMock()
+        settings.output_files = OutputFilesConfig()
+        return settings
+
+    @pytest.fixture
+    def client(self, settings):
+        with patch('workers.executor.clients.get_settings', return_value=settings):
+            return EnclaveClientLocal()
+
+    @pytest.fixture
+    def attest(self):
+        """Stands in for the local attestation generator and records the user_data it binds."""
+        with patch('workers.executor.clients.generate_local_attestation',
+                   return_value=(True, {'document': 'ZG9j', 'module_id': 'local'})) as mock:
+            yield mock
+
+    def _run(self, client, zip_data, db_fetch=False):
+        public_key, session_id = client.get_public_key('JOB-FILES')
+        encrypted_zip = client.encrypt_zip_data(zip_data, public_key)
+        if db_fetch:
+            return client.send_encrypted_data_with_db_fetch(session_id, encrypted_zip, 'creds', 'SELECT 1')
+        return client.send_encrypted_data_to_enclave(session_id, encrypted_zip)
+
+    @staticmethod
+    def _user_data(attest):
+        return json.loads(attest.call_args.kwargs['user_data'])
+
+    def test_files_are_returned_with_their_manifest_hash(self, client, attest):
+        success, output, attestation, files = self._run(client, _bundle(FILES_SCRIPT))
+
+        assert success is True
+        assert 'backend=Agg' in output and 'mplconfig=True' in output
+        table, chart = b'group,n\na,7\n', b'\x89PNG\r\n\x1a\n'
+        assert files['files'] == [
+            {'name': 'chart.png', 'size': len(chart), 'sha256': hashlib.sha256(chart).hexdigest(),
+             'type': 'image/png', 'content_b64': base64.b64encode(chart).decode()},
+            {'name': 'table.csv', 'size': len(table), 'sha256': hashlib.sha256(table).hexdigest(),
+             'type': 'text/csv', 'content_b64': base64.b64encode(table).decode()},
+        ]
+        assert files['files_manifest_sha256'] == manifest_sha256(build_manifest(files['files']))
+        assert self._user_data(attest)['files_manifest_sha256'] == files['files_manifest_sha256']
+        assert attestation['attestation']['is_local'] is True
+
+    def test_a_run_without_files_binds_the_empty_manifest(self, client, attest):
+        success, _output, _attestation, files = self._run(client, _bundle('print("no files")'))
+
+        assert success is True
+        assert files == {'files': [], 'files_manifest_sha256': EMPTY_MANIFEST_SHA256}
+        assert self._user_data(attest)['files_manifest_sha256'] == EMPTY_MANIFEST_SHA256
+
+    def test_a_failed_script_returns_no_files(self, client, attest):
+        script = FILES_SCRIPT + 'raise SystemExit(3)\n'
+        success, output, _attestation, files = self._run(client, _bundle(script))
+
+        assert (success, files) == (True, None)
+        assert 'exit code 3' in output
+        assert 'files_manifest_sha256' not in self._user_data(attest)
+
+    @pytest.mark.parametrize('script, reason', [
+        ("os.symlink('/etc/hosts', os.path.join(out, 'hosts.txt'))", 'symlink not allowed'),
+        ("os.mkdir(os.path.join(out, 'nested'))", 'subdirectory not allowed'),
+        ("open(os.path.join(out, 'model.pkl'), 'wb').close()", 'extension not allowed'),
+        ("open(os.path.join(out, '-x.csv'), 'w').close()", 'invalid name'),
+        ("[open(os.path.join(out, f'{i}.txt'), 'w').close() for i in range(3)]", '3 files, at most 2'),
+        ("open(os.path.join(out, 'big.txt'), 'wb').write(b'x' * (1024 * 1024 + 1))", 'exceed 1048576 bytes'),
+    ])
+    def test_files_breaking_the_rules_fail_the_run(self, client, settings, attest, script, reason):
+        settings.output_files = OutputFilesConfig(max_files=2, max_total_mb=1)
+
+        success, output, attestation, files = self._run(
+            client, _bundle(f"import os\nout = os.environ['EPSILON_OUTPUT_DIR']\n{script}\n")
+        )
+
+        assert (success, attestation, files) == (False, None, None)
+        assert output.startswith('Output files rejected: ')
+        assert reason in output
+        attest.assert_not_called()
+
+    def test_the_db_fetch_path_returns_the_files(self, client):
+        success, _output, attestation, files = self._run(client, _bundle(FILES_SCRIPT), db_fetch=True)
+
+        assert (success, attestation) == (True, None)
+        assert [f['name'] for f in files['files']] == ['chart.png', 'table.csv']
