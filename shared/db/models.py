@@ -167,6 +167,24 @@ class JobOutput(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)  # SHA-256 of the UTF-8 content
     attested_output_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # SHA-256 of the canonical files manifest (migration d8b4f1a6c3e9); NULL for output
+    # held before files existed or from an enclave that returns none
+    files_manifest_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class JobOutputFile(Base):
+    """A file written by a real-data run, held with its output; the bytes live in the output file store"""
+    __tablename__ = "job_output_files"
+
+    job_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("job_outputs.job_id", ondelete="CASCADE"), primary_key=True
+    )
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)  # jobs/<job_id>/<sha256>
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

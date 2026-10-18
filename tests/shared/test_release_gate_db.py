@@ -1,4 +1,4 @@
-"""Output-release gate against a real Postgres: migrations 7f3a9c2d1e4b and c5e2a8d4b7f1, and JobRepository.
+"""Output-release gate against a real Postgres: migrations 7f3a9c2d1e4b, c5e2a8d4b7f1 and d8b4f1a6c3e9, and JobRepository.
 
 Needs TEST_DATABASE_URL, an admin URL of a throwaway server (for example
 postgresql://postgres@localhost:55432/postgres). Each run creates and drops its
@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BASE_SCHEMA = ROOT / 'tests' / 'fixtures' / 'release_gate_base_schema.sql'
 BASE_REVISION = '2e1ea7116ba4'
 GATE_REVISION = '7f3a9c2d1e4b'
-HEAD_REVISION = 'c5e2a8d4b7f1'
+HEAD_REVISION = 'd8b4f1a6c3e9'
 
 ALICE = '00000000-0000-0000-0000-0000000000a1'
 BOB = '00000000-0000-0000-0000-0000000000b2'  # reviewer of PROJECT

@@ -6,15 +6,16 @@ import hashlib
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Sequence
 import json
 
-from sqlalchemy import create_engine, select, update, and_, text, func
+from sqlalchemy import create_engine, select, update, and_, text, func, delete
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from ..config import config
-from .models import Base, JobRequest, Workspace, JobLog, JobOutput
+from ..output_manifest import build_manifest, manifest_sha256
+from .models import Base, JobRequest, Workspace, JobLog, JobOutput, JobOutputFile
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,8 @@ class JobRepository:
         content: str,
         attested_output_hash: Optional[str] = None,
         error_message: Optional[str] = None,
+        files: Optional[Sequence[Dict[str, Any]]] = None,
+        files_manifest_sha256: Optional[str] = None,
         **fields
     ) -> Dict[str, Any]:
         """Finish a real-data run, holding its result or error text for review.
@@ -186,9 +189,24 @@ class JobRepository:
         an earlier held message). release_status becomes 'pending' unless it is
         final (released/withheld). Other fields are applied as in
         update_job_status. execution_output is never written.
+
+        A result may come with the files the run wrote (dicts with name, size,
+        content_type, sha256 and storage_key; the bytes are already stored) and
+        files_manifest_sha256, the hash of their manifest. They are held, kept or
+        replaced together with the text: replacing an output replaces its file
+        rows and manifest hash. files_manifest_sha256 None means the enclave
+        returned no files key (legacy); a run without files has the hash of [].
         """
         if kind not in ('result', 'error'):
             raise ValueError(f"Unknown held output kind: {kind}")
+        files = list(files or [])
+        if files_manifest_sha256 is None:
+            if files:
+                raise ValueError("held files need their files_manifest_sha256")
+        elif kind != 'result':
+            raise ValueError("only a held result can have files")
+        elif manifest_sha256(build_manifest(dict(f, type=f['content_type']) for f in files)) != files_manifest_sha256:
+            raise ValueError("files_manifest_sha256 does not match the held files")
         _reject_execution_output(fields)
         for key in ('release_status', 'output_sha256'):
             if key in fields:
@@ -223,6 +241,16 @@ class JobRepository:
                 held.content = content
                 held.content_sha256 = content_sha256
                 held.attested_output_hash = attested_output_hash
+                held.files_manifest_sha256 = files_manifest_sha256
+                session.execute(delete(JobOutputFile).where(JobOutputFile.job_id == job_id))
+                session.flush()
+                session.add_all(
+                    JobOutputFile(
+                        job_id=job_id, name=f['name'], size=f['size'], content_type=f['content_type'],
+                        sha256=f['sha256'], storage_key=f['storage_key'],
+                    )
+                    for f in files
+                )
                 if kind == 'result':
                     job.output_sha256 = content_sha256
                     # A held message from an earlier failed run must not linger next to the result
