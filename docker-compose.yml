@@ -88,6 +88,11 @@ services:
       # Enclave
       USE_LOCAL_ENCLAVE: ${USE_LOCAL_ENCLAVE:-false}
       ENCLAVE_VSOCK_PORT: ${ENCLAVE_VSOCK_PORT:-5005}
+      # Output files (s3 | local); unset: a run that writes a file fails
+      OUTPUT_FILES_STORE: ${OUTPUT_FILES_STORE:-}
+      OUTPUT_FILES_BUCKET: ${OUTPUT_FILES_BUCKET:-}
+      OUTPUT_FILES_KMS_KEY_ID: ${OUTPUT_FILES_KMS_KEY_ID:-}
+      OUTPUT_FILES_DIR: ${OUTPUT_FILES_DIR:-}
     volumes:
       - shared_storage:/shared/epsilon
     networks:
