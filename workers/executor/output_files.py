@@ -16,11 +16,11 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 
-from shared.output_manifest import FILE_NAME_PATTERN, build_manifest, file_type, manifest_sha256
+from shared.output_manifest import build_manifest, file_type, manifest_sha256, valid_file_name
 from workers.executor.settings import OutputFilesConfig
 
 REJECTED_PREFIX = "Output files rejected: "
@@ -58,11 +58,9 @@ def _verify_file(index: int, entry: Any) -> OutputFile:
     if not isinstance(entry, dict):
         raise _reject(f"file {index} is not an object")
     name = entry.get('name')
-    if not isinstance(name, str) or not FILE_NAME_PATTERN.fullmatch(name):
+    if not valid_file_name(name):
         raise _reject(f"file {index} has an invalid name")
     content_type = file_type(name)
-    if content_type is None:
-        raise _reject(f"{name}: extension not allowed")
     if entry.get('type') != content_type:
         raise _reject(f"{name}: type does not match its extension")
     content_b64 = entry.get('content_b64')
@@ -127,36 +125,54 @@ def verify_output_files(
     return VerifiedOutputFiles(files=sorted(files, key=lambda f: f.name), manifest_sha256=digest)
 
 
+def _walk_output_dir(output_dir: str) -> List[Tuple[str, str]]:
+    """(name, path) of every regular file under output_dir; names are relative, '/'-separated."""
+    found = []
+    pending = [(output_dir, '')]
+    while pending:
+        path, prefix = pending.pop()
+        for entry in os.scandir(path):
+            name = prefix + entry.name
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISLNK(mode):
+                raise _reject(f"symlink not allowed: {name!r}")
+            if stat.S_ISDIR(mode):
+                pending.append((entry.path, name + '/'))
+            elif stat.S_ISREG(mode):
+                found.append((name, entry.path))
+            else:
+                raise _reject(f"not a regular file: {name!r}")
+    return sorted(found)
+
+
 def collect_output_files(output_dir: str, max_files: int, max_total_bytes: int) -> Dict[str, Any]:
-    """The files a script left in output_dir, as an enclave response carries them (local enclave).
+    """The files a script left under output_dir, as an enclave response carries them (local enclave).
 
     Returns {'files': [{name, size, sha256, type, content_b64}] in manifest order,
-    'files_manifest_sha256'}. A missing or empty directory means no files. Only regular
-    files directly in output_dir are allowed; the name, type and limit rules are those
-    verify_output_files applies to an enclave response. Raises OutputFilesError.
+    'files_manifest_sha256'}. A missing or empty directory means no files. output_dir is
+    walked recursively without following symlinks; a file's name is its path relative to
+    output_dir, and empty directories are ignored. Every entry must be a regular file or a
+    directory; the name, type and limit rules are those verify_output_files applies to an
+    enclave response. Raises OutputFilesError.
     """
     entries = []
     if os.path.lexists(output_dir):
         if os.path.islink(output_dir) or not os.path.isdir(output_dir):
             raise _reject("outputs is not a directory")
-        total = 0
         try:
-            for entry in sorted(os.scandir(output_dir), key=lambda e: e.name):
-                mode = entry.stat(follow_symlinks=False).st_mode
-                if stat.S_ISLNK(mode):
-                    raise _reject(f"symlink not allowed: {entry.name!r}")
-                if stat.S_ISDIR(mode):
-                    raise _reject(f"subdirectory not allowed: {entry.name!r}")
-                if not stat.S_ISREG(mode):
-                    raise _reject(f"not a regular file: {entry.name!r}")
-                fd = os.open(entry.path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+            found = _walk_output_dir(output_dir)
+            if len(found) > max_files:
+                raise _reject(f"{len(found)} files, at most {max_files} are allowed")
+            total = 0
+            for name, path in found:
+                fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
                 with os.fdopen(fd, 'rb') as f:
                     # Never read past the limit; a larger total is rejected below
                     content = f.read(max(max_total_bytes - total, 0) + 1)
                 total += len(content)
                 entries.append({
-                    'name': entry.name, 'size': len(content), 'sha256': hashlib.sha256(content).hexdigest(),
-                    'type': file_type(entry.name), 'content_b64': base64.b64encode(content).decode(),
+                    'name': name, 'size': len(content), 'sha256': hashlib.sha256(content).hexdigest(),
+                    'type': file_type(name), 'content_b64': base64.b64encode(content).decode(),
                 })
         except OSError as e:
             raise _reject(str(e)) from None

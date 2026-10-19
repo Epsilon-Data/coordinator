@@ -180,7 +180,7 @@ class JobOutputFile(Base):
     job_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("job_outputs.job_id", ondelete="CASCADE"), primary_key=True
     )
-    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
     size: Mapped[int] = mapped_column(Integer, nullable=False)
     content_type: Mapped[str] = mapped_column(String(64), nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)

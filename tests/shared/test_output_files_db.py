@@ -1,4 +1,4 @@
-"""Output files against a real Postgres: migration d8b4f1a6c3e9 and JobRepository.complete_job_with_held_output.
+"""Output files against a real Postgres: migrations d8b4f1a6c3e9 and f2b7d5e9a1c4 and JobRepository.complete_job_with_held_output.
 
 Needs TEST_DATABASE_URL like test_release_gate_db, whose database helpers it reuses.
 """
@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import uuid
 import zipfile
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,7 @@ from tests.shared.test_release_gate_db import (  # noqa: F401 (gate_db, repo and
     ALICE,
     BASE_REVISION,
     BOB,
+    HEAD_REVISION,
     PROJECT,
     WS_ALICE,
     _alembic,
@@ -57,6 +59,7 @@ pytestmark = pytest.mark.skipif(
 
 PROJECT_REVISION = 'c5e2a8d4b7f1'
 FILES_REVISION = 'd8b4f1a6c3e9'
+PATHS_REVISION = 'f2b7d5e9a1c4'
 CONTENT = 'count=7\n'
 
 
@@ -166,6 +169,55 @@ class TestHeldFiles:
         with pytest.raises(ValueError, match=error):
             repo.complete_job_with_held_output(job_id, **args)
         assert _held(engine, job_id) is None
+
+
+INSERT_FILE = ("INSERT INTO job_output_files (job_id, name, size, content_type, sha256, storage_key) "
+               "VALUES (:job_id, :name, 1, 'application/octet-stream', :sha, 'k')")
+LONGEST_NAME = '/'.join(['a' * 50] * 4 + ['b' * 51])  # 5 segments, 255 characters
+
+
+class TestFileNames:
+    """The CHECK on job_output_files.name is the name rule: a relative path of 1 to 5 segments, at most 255 characters."""
+
+    @pytest.fixture
+    def job_id(self, repo, engine):
+        job_id = _new_job(engine, f'JOB-F-NAME-{uuid.uuid4().hex[:12]}')
+        _hold(repo, job_id)
+        return job_id
+
+    @pytest.mark.parametrize('name', [
+        'a', 'notes.txt', 'plots/fig1.png', 'a/b/c/d/e.bin', 'README', 'x' * 100, LONGEST_NAME,
+    ], ids=['one', 'flat', 'path', 'five', 'noext', 'segment100', 'longest'])
+    def test_paths_are_accepted(self, engine, job_id, name):
+        with engine.begin() as conn:
+            conn.execute(text(INSERT_FILE), {'job_id': job_id, 'name': name, 'sha': 'a' * 64})
+        assert [r['name'] for r in _file_rows(engine, job_id)] == [name]
+
+    @pytest.mark.parametrize('name', [
+        '', '.hidden', 'a/.hidden', '../x', 'a/../b', './a', '/a', 'a/', 'a//b', 'a b', 'x' * 101,
+        'a/b/c/d/e/f', 'a\\b', 'x.csv\n', 'caf\u00e9',
+    ])
+    def test_bad_names_are_rejected(self, engine, job_id, name):
+        _expect_sqlstate(engine, '23514', INSERT_FILE, job_id=job_id, name=name, sha='a' * 64)
+
+    def test_names_over_255_characters_are_rejected(self, engine, job_id):
+        with pytest.raises(DBAPIError) as excinfo:
+            with engine.begin() as conn:
+                conn.execute(text(INSERT_FILE), {'job_id': job_id, 'name': LONGEST_NAME + 'a', 'sha': 'a' * 64})
+        assert excinfo.value.orig.pgcode in ('22001', '23514')
+
+    def test_the_check_is_the_rule(self, engine):
+        (row,) = _rows(engine, "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+                               "WHERE conname = 'job_output_files_name_check'")
+        assert '{0,4}' in row['def'] and 'char_length' in row['def']
+
+    def test_a_subfolder_file_is_held(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-F-PATH')
+        files = [_file(job_id, 'plots/raw/fig.bin', b'\x00\x01\x02', 'application/octet-stream'),
+                 _file(job_id, 'table.csv', b'a,b\n')]
+        _hold(repo, job_id, files)
+        assert _file_rows(engine, job_id) == files
+        assert _held(engine, job_id)['files_manifest_sha256'] == _manifest(files)
 
 
 class TestDecisionManifest:
@@ -281,7 +333,7 @@ class TestMigration:
                 project_guard = _guard_body(engine)
 
                 _alembic(url, command.upgrade, 'head')
-                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': FILES_REVISION}]
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
                 # Output held before the revision has no manifest, and is still decided without one
                 assert _held(engine, 'JOB-F-PROD')['files_manifest_sha256'] is None
                 _decide(engine, 'JOB-F-PROD', None)
@@ -292,7 +344,7 @@ class TestMigration:
                 _hold(repo, job_id, [_file(job_id, 'table.csv', b'a')])
                 with pytest.raises(DBAPIError, match='refusing to downgrade'):
                     _alembic(url, command.downgrade, PROJECT_REVISION)
-                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': FILES_REVISION}]
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
 
                 with engine.begin() as conn:
                     conn.execute(text('DELETE FROM job_output_files WHERE job_id = :job_id'), {'job_id': job_id})
@@ -306,7 +358,62 @@ class TestMigration:
                                      "('job_output_files_guard', 'job_outputs_files_manifest_guard')") == []
 
                 _alembic(url, command.upgrade, 'head')
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
+            finally:
+                database.close()
+
+
+def _hold_flat_files_at_files_revision(engine, repo):
+    """Held files as production has them at d8b4f1a6c3e9: flat names, one at the old 100-character limit."""
+    job_id = _new_job(engine, 'JOB-F-PROD-FILES')
+    files = [_file(job_id, 'table.csv', b'a,b\n'), _file(job_id, 'chart.png', b'png', 'image/png'),
+             _file(job_id, 'x' * 96 + '.txt', b'notes', 'text/plain')]
+    _hold(repo, job_id, files)
+    return job_id, files
+
+
+def _name_column(engine):
+    (row,) = _rows(engine, "SELECT character_maximum_length AS length FROM information_schema.columns "
+                           "WHERE table_name = 'job_output_files' AND column_name = 'name'")
+    (check,) = _rows(engine, "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+                             "WHERE conname = 'job_output_files_name_check'")
+    return row['length'], check['def']
+
+
+class TestPathsMigration:
+    def test_upgrade_over_flat_files_and_downgrade_refusing_paths(self):
+        with _fresh_database() as url:
+            _alembic(url, command.stamp, BASE_REVISION)
+            _alembic(url, command.upgrade, FILES_REVISION)
+            database = Database(url)
+            try:
+                engine, repo = database.engine, JobRepository(database)
+                flat_job, flat_files = _hold_flat_files_at_files_revision(engine, repo)
+                files_column = _name_column(engine)
+                assert files_column[0] == 100
+
+                _alembic(url, command.upgrade, 'head')
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': PATHS_REVISION}]
+                length, check = _name_column(engine)
+                assert length == 255 and '{0,4}' in check and 'char_length' in check
+                assert _file_rows(engine, flat_job) == sorted(flat_files, key=lambda f: f['name'])
+                _expect_sqlstate(engine, '23514', INSERT_FILE, job_id=flat_job, name='a/../b', sha='a' * 64)
+
+                path_job = _new_job(engine, 'JOB-F-PATH-DOWN')
+                _hold(repo, path_job, [_file(path_job, 'plots/fig.bin', b'\x00', 'application/octet-stream')])
+                with pytest.raises(DBAPIError, match='refusing to downgrade'):
+                    _alembic(url, command.downgrade, FILES_REVISION)
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': PATHS_REVISION}]
+
+                with engine.begin() as conn:
+                    conn.execute(text('DELETE FROM job_output_files WHERE job_id = :job_id'), {'job_id': path_job})
+                _alembic(url, command.downgrade, FILES_REVISION)
                 assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': FILES_REVISION}]
+                assert _name_column(engine) == files_column
+                assert _file_rows(engine, flat_job) == sorted(flat_files, key=lambda f: f['name'])
+
+                _alembic(url, command.upgrade, 'head')
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': PATHS_REVISION}]
             finally:
                 database.close()
 
@@ -316,6 +423,8 @@ LOCAL_SCRIPT = (
     "out = os.environ['EPSILON_OUTPUT_DIR']\n"
     "open(os.path.join(out, 'table.csv'), 'w').write('group,n\\na,7\\n')\n"
     "open(os.path.join(out, 'chart.png'), 'wb').write(b'PNG')\n"
+    "os.makedirs(os.path.join(out, 'plots', 'raw'))\n"
+    "open(os.path.join(out, 'plots', 'raw', 'fig.bin'), 'wb').write(bytes([0, 1, 2]))\n"
     "print('count=7')\n"
 )
 
@@ -373,13 +482,15 @@ class TestLocalEnclaveRun:
                 patch('workers.executor.worker.verify_attestation', _verify_local_attestation):
             assert worker.process_job(job) is True
 
-        table, chart = b'group,n\na,7\n', b'PNG'
-        files = [_file(job_id, 'chart.png', chart, 'image/png'), _file(job_id, 'table.csv', table)]
+        table, chart, fig = b'group,n\na,7\n', b'PNG', b'\x00\x01\x02'
+        files = [_file(job_id, 'chart.png', chart, 'image/png'),
+                 _file(job_id, 'plots/raw/fig.bin', fig, 'application/octet-stream'),
+                 _file(job_id, 'table.csv', table)]
         held = _held(engine, job_id)
         assert (held['kind'], held['content']) == ('result', 'count=7\n')
         assert held['files_manifest_sha256'] == _manifest(files)
         assert _file_rows(engine, job_id) == files
-        for f, data in zip(files, (chart, table)):
+        for f, data in zip(files, (chart, fig, table)):
             assert (tmp_path / 'files' / f['storage_key']).read_bytes() == data
         row = _job(engine, job_id)
         assert row['status'] == 'success'
