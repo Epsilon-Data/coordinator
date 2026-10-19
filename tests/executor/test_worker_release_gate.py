@@ -676,7 +676,7 @@ class TestNothingReachesJobLogs:
 
     def test_enclave_failure_text_is_held_not_logged(self, secure_worker, enclave, repo, job_logs, caplog):
         error = f'Script failed (exit code 1)\nSTDOUT: {MARKER}\nSTDERR: KeyError'
-        enclave.send_encrypted_data_to_enclave.return_value = (False, error, None)
+        enclave.send_encrypted_data_to_enclave.return_value = (False, error, None, None)
 
         assert secure_worker.process_job(_job()) is False
 
@@ -698,7 +698,7 @@ class TestNothingReachesJobLogs:
         _assert_never_logged(caplog)
 
     def test_success_output_is_held_not_logged(self, secure_worker, enclave, repo, job_logs, caplog):
-        enclave.send_encrypted_data_to_enclave.return_value = (True, f'count={MARKER}\n', None)
+        enclave.send_encrypted_data_to_enclave.return_value = (True, f'count={MARKER}\n', None, None)
 
         assert secure_worker.process_job(_job()) is True
 
@@ -711,14 +711,14 @@ class TestEnclaveClientsDoNotLogTheEnclaveError:
     def test_nitro_client(self, caplog):
         client = EnclaveClient(enclave_cid=16)
         with patch.object(client, '_send_to_enclave', return_value={'success': False, 'error': MARKER}):
-            assert client.send_encrypted_data_to_enclave('session', 'zip') == (False, MARKER, None)
-            assert client.send_encrypted_data_with_db_fetch('session', 'zip', 'creds', 'SELECT 1') == (False, MARKER, None)
+            assert client.send_encrypted_data_to_enclave('session', 'zip') == (False, MARKER, None, None)
+            assert client.send_encrypted_data_with_db_fetch('session', 'zip', 'creds', 'SELECT 1') == (False, MARKER, None, None)
         _assert_never_logged(caplog)
 
     def test_tdx_client(self, caplog):
         client = EnclaveClientTDX(host='127.0.0.1', port=1)
         with patch.object(client, '_send_to_td', return_value={'success': False, 'error': MARKER}):
-            assert client.send_encrypted_data_to_enclave('session', 'zip') == (False, MARKER, None)
+            assert client.send_encrypted_data_to_enclave('session', 'zip') == (False, MARKER, None, None)
         _assert_never_logged(caplog)
 
 

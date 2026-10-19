@@ -39,7 +39,7 @@ class TestSecureExecutor:
         client = MagicMock()
         client.get_public_key.return_value = ('-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----', 'session_123')
         client.encrypt_zip_data.return_value = 'encrypted_zip_base64'
-        client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None)
+        client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None, None)
         client.health_check.return_value = True
         client.enclave_cid = 999
         return client
@@ -217,7 +217,7 @@ datasets: []
 
     def test_execute_enclave_failure(self, secure_executor, sample_request, mock_enclave_client):
         """Test handling of enclave execution failure."""
-        mock_enclave_client.send_encrypted_data_to_enclave.return_value = (False, 'Script failed', None)
+        mock_enclave_client.send_encrypted_data_to_enclave.return_value = (False, 'Script failed', None, None)
 
         result = secure_executor.execute(sample_request)
 
@@ -345,8 +345,8 @@ datasets: []
 
     def test_step_execute_in_enclave(self, secure_executor, mock_enclave_client):
         """Test enclave execution step."""
-        mock_enclave_client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None)
-        success, output, attestation, enclave_timing = secure_executor._step_execute_in_enclave(
+        mock_enclave_client.send_encrypted_data_to_enclave.return_value = (True, 'Script output', None, None)
+        success, output, attestation, enclave_timing, output_files = secure_executor._step_execute_in_enclave(
             'JOB-123', 'session_123', 'encrypted_zip', 'encrypted_csv'
         )
 

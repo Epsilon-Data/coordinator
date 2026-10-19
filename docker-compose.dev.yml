@@ -70,6 +70,11 @@ services:
       EPSILON_COORDINATOR_CLIENT_ID: ${EPSILON_COORDINATOR_CLIENT_ID:-coordinator-client}
       EPSILON_COORDINATOR_CLIENT_SECRET: ${EPSILON_COORDINATOR_CLIENT_SECRET:-}
       PROJECT_ACCESS_CHECK: ${PROJECT_ACCESS_CHECK:-enforce}
+      # Output files (s3 | local); local keeps them in the shared storage volume
+      OUTPUT_FILES_STORE: ${OUTPUT_FILES_STORE:-local}
+      OUTPUT_FILES_BUCKET: ${OUTPUT_FILES_BUCKET:-}
+      OUTPUT_FILES_KMS_KEY_ID: ${OUTPUT_FILES_KMS_KEY_ID:-}
+      OUTPUT_FILES_DIR: ${OUTPUT_FILES_DIR:-/shared/epsilon/output-files}
     volumes:
       - ./shared_storage:/shared/epsilon
     networks:

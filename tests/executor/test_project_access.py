@@ -84,7 +84,7 @@ def enclave():
     client = MagicMock()
     client.get_public_key.return_value = ('pubkey-pem', 'session_123')
     client.encrypt_zip_data.return_value = 'encrypted_zip_base64'
-    client.send_encrypted_data_to_enclave.return_value = (True, 'count=7\n', None)
+    client.send_encrypted_data_to_enclave.return_value = (True, 'count=7\n', None, None)
     client.health_check.return_value = True
     client.enclave_cid = 16
     return client
@@ -428,7 +428,7 @@ class TestAccessCheckDisabled:
         local = MagicMock(spec=EnclaveClientLocal)
         local.get_public_key.return_value = ('pubkey-pem', 'local_session_1')
         local.encrypt_zip_data.return_value = 'encrypted_zip_base64'
-        local.send_encrypted_data_to_enclave.return_value = (True, 'count=7\n', None)
+        local.send_encrypted_data_to_enclave.return_value = (True, 'count=7\n', None, None)
         local.health_check.return_value = True
         worker = make_worker(enclave_client=local)
 

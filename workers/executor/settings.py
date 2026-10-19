@@ -124,6 +124,23 @@ class ExecutionConfig:
 
 
 @dataclass
+class OutputFilesConfig:
+    """Where the files a real-data run writes are stored (OUTPUT_FILES_STORE = s3 | local).
+
+    Unset: a run that writes a file fails. s3 uses the default AWS credential chain and,
+    with OUTPUT_FILES_KMS_KEY_ID, SSE-KMS (otherwise the bucket's default encryption).
+    The limits re-check the enclave's MAX_OUTPUT_FILES / MAX_OUTPUT_FILES_MB.
+    """
+    store: str = field(default_factory=lambda: os.getenv('OUTPUT_FILES_STORE', '').strip().lower())
+    bucket: str = field(default_factory=lambda: os.getenv('OUTPUT_FILES_BUCKET', '').strip())
+    kms_key_id: str = field(default_factory=lambda: os.getenv('OUTPUT_FILES_KMS_KEY_ID', '').strip())
+    region: str = field(default_factory=lambda: os.getenv('AWS_REGION', 'ap-southeast-2'))
+    directory: str = field(default_factory=lambda: os.getenv('OUTPUT_FILES_DIR', '').strip())
+    max_files: int = field(default_factory=lambda: int(os.getenv('MAX_OUTPUT_FILES', '20')))
+    max_total_mb: int = field(default_factory=lambda: int(os.getenv('MAX_OUTPUT_FILES_MB', '10')))
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration."""
     level: str = field(default_factory=lambda: os.getenv('LOG_LEVEL', 'INFO'))
@@ -166,6 +183,7 @@ class Settings:
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     atl: ATLConfig = field(default_factory=ATLConfig)
     project_access: ProjectAccessConfig = field(default_factory=ProjectAccessConfig)
+    output_files: OutputFilesConfig = field(default_factory=OutputFilesConfig)
 
     worker_id: str = field(default_factory=lambda: os.getenv('WORKER_ID', 'executor-001'))
     environment: str = field(default_factory=lambda: os.getenv('ENVIRONMENT', 'development'))
@@ -185,6 +203,7 @@ class Settings:
             'coordinator': coordinator,
             'middleware': {k: v for k, v in self.middleware.__dict__.items() if k != 'endpoint_url'},
             'proxy': self.proxy.__dict__,
+            'output_files': self.output_files.__dict__,
             'worker_id': self.worker_id,
             'environment': self.environment,
             'job_fetch_mode': self.job_fetch_mode
@@ -238,6 +257,14 @@ def validate_environment(settings: Settings) -> Tuple[bool, List[str]]:
 
     if settings.execution.max_output_size_mb < 1:
         errors.append("Max output size must be at least 1 MB")
+
+    output_files = settings.output_files
+    if output_files.store not in ('', 's3', 'local'):
+        errors.append(f"OUTPUT_FILES_STORE must be s3 or local, not {output_files.store}")
+    if output_files.store == 's3' and not output_files.bucket:
+        errors.append("OUTPUT_FILES_BUCKET is required when OUTPUT_FILES_STORE=s3")
+    if output_files.store == 'local' and not output_files.directory:
+        errors.append("OUTPUT_FILES_DIR is required when OUTPUT_FILES_STORE=local")
 
     if settings.is_production():
         if settings.enclave.debug_mode:

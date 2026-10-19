@@ -41,6 +41,7 @@ class TdxVerificationResult:
     output_hash: Optional[str] = None
     dataset_hash: Optional[str] = None
     context_hash: Optional[str] = None
+    files_manifest_sha256: Optional[str] = None
     module_id: str = "tdx"
     error: Optional[str] = None
 
@@ -124,6 +125,7 @@ def verify_tdx_attestation(
                 result.output_hash = bound.get("output_hash") or None
                 result.dataset_hash = bound.get("dataset_hash") or None
                 result.context_hash = bound.get("context_hash") or bound.get("atl_context_hash") or None
+                result.files_manifest_sha256 = bound.get("files_manifest_sha256") or None
             if expected_output is not None:
                 expected_output_hash = hashlib.sha256(expected_output.encode()).hexdigest()
                 if not isinstance(result.output_hash, str) or result.output_hash.lower() != expected_output_hash:

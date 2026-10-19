@@ -10,7 +10,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from sqlalchemy import select, text
 
@@ -24,7 +24,7 @@ from shared.db.models import JobRequest
 from shared.base_worker import ExecutorWorkerBase
 from workers.executor.utils import get_logger, setup_logging, held_text_digest
 from workers.executor.interfaces import IExecutor
-from workers.executor.models import JobExecutionRequest, JobStatus
+from workers.executor.models import ExecutionResult, JobExecutionRequest, JobStatus
 from workers.executor.settings import get_settings, validate_and_raise
 from workers.executor.exceptions import ConfigurationError
 from workers.executor.factories import ExecutorFactory
@@ -32,6 +32,13 @@ from workers.executor.atl_client import ATLClient
 from workers.executor.jac import sign_jac, compute_script_hash, compute_context_hash
 from workers.executor.constants import EnclaveBackend
 from workers.executor.tdx_verifier import verify_tdx_attestation
+from workers.executor.output_files import (
+    OutputFilesError,
+    STORE_NOT_CONFIGURED_MESSAGE,
+    output_file_store,
+    store_output_files,
+    verify_output_files,
+)
 
 # Held in place of a job's output or error text when that text could not be stored,
 # so the job still ends pending and a reviewer can act on it.
@@ -99,6 +106,21 @@ def _attested_output_hash(verification_receipt: Optional[str]) -> Optional[str]:
     return output_hash.lower()
 
 
+def _receipt_files_manifest_sha256(verification_receipt: Optional[str]) -> Optional[str]:
+    """files_manifest_sha256 from the attestation user_data, as recorded in the verification receipt.
+
+    Read whether or not the attestation is authentic: a run whose attestation fails
+    verification still has its output held, and approving its result is refused (RG009).
+    """
+    if not verification_receipt:
+        return None
+    try:
+        value = json.loads(verification_receipt).get("files_manifest_sha256")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return None
+    return value if isinstance(value, str) else None
+
+
 class ExecutorWorker(ExecutorWorkerBase):
     """Database polling worker for processing job execution requests."""
 
@@ -138,6 +160,13 @@ class ExecutorWorker(ExecutorWorkerBase):
             logger.info("[ATL] ATL integration disabled (ATL_ENABLED=false or not configured)")
 
         self._init_recovery_settings()
+
+        # Where the files a run writes are stored; without a store a run that writes one fails
+        self._output_file_store = output_file_store(self._settings.output_files)
+        if self._output_file_store is None:
+            logger.warning("[FILES] OUTPUT_FILES_STORE is not set; runs that write output files will fail")
+        else:
+            logger.info(f"[FILES] Output files are stored in {self._settings.output_files.store}")
 
         # Jobs are only claimed once the enclave answers (see fetch_jobs), so a
         # worker that starts before the enclave simply waits.
@@ -374,6 +403,7 @@ class ExecutorWorker(ExecutorWorkerBase):
                 "pcrs": {"pcr0": vr.pcr0, "pcr1": vr.pcr1, "pcr2": vr.pcr2},
                 "output_hash": vr.output_hash,
                 **_attested_input_hashes(checks, user_data.get("dataset_hash"), user_data.get("context_hash")),
+                "files_manifest_sha256": user_data.get("files_manifest_sha256"),
                 "module_id": vr.module_id,
                 "timestamp": vr.timestamp.isoformat() if vr.timestamp else None,
                 "verifier_version": "1.0.0",
@@ -423,6 +453,7 @@ class ExecutorWorker(ExecutorWorkerBase):
             },
             "output_hash": result.output_hash,
             **_attested_input_hashes(checks, result.dataset_hash, result.context_hash),
+            "files_manifest_sha256": result.files_manifest_sha256,
             "module_id": result.module_id,
             "verifier_version": "tdx-1.0.0",
             "error": result.error,
@@ -494,6 +525,31 @@ class ExecutorWorker(ExecutorWorkerBase):
             logger.error(f"[ATL] Error submitting to ATL for job {job_id}: {e}")
             return None
 
+    def _accept_output_files(
+        self, job_id: str, result: ExecutionResult, verification_receipt: Optional[str]
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Verify the run's files and write their bytes to the store, before the job's transaction.
+
+        Returns (file rows, files_manifest_sha256); ([], None) when the enclave returned no
+        files key. Raises OutputFilesError when a check fails, or when the run wrote files
+        and no store is configured; nothing is stored then.
+        """
+        if result.output_files is None:
+            return [], None
+        limits = self._settings.output_files
+        verified = verify_output_files(
+            result.output_files,
+            attestation_present=bool(result.attestation),
+            attested_manifest_sha256=_receipt_files_manifest_sha256(verification_receipt),
+            max_files=limits.max_files,
+            max_total_bytes=limits.max_total_mb * 1024 * 1024,
+        )
+        if not verified.files:
+            return [], verified.manifest_sha256
+        if self._output_file_store is None:
+            raise OutputFilesError(STORE_NOT_CONFIGURED_MESSAGE)
+        return store_output_files(self._output_file_store, job_id, verified), verified.manifest_sha256
+
     def process_job(self, job: Dict[str, Any]) -> bool:
         """
         High-level logic: fetch job -> load repo -> get public_key -> zip & encrypt -> send to enclave
@@ -564,6 +620,30 @@ class ExecutorWorker(ExecutorWorkerBase):
                         job_id, result.attestation, logger, expected_output=content,
                     )
 
+                try:
+                    held_files, files_manifest_sha256 = self._accept_output_files(job_id, result, verification_receipt)
+                except OutputFilesError as files_error:
+                    # The run fails; its files are not stored. The reason may name a file: held, not logged.
+                    if self._atl_client:
+                        self._atl_client.submit_la_entry(
+                            job_id=job_id,
+                            error_class=JobStatus.FAILED.value,
+                            error_detail="",
+                        )
+                    job_repository.complete_job_with_held_output(
+                        job_id,
+                        status=JobStatus.FAILED.value,
+                        kind='error',
+                        content=str(files_error),
+                        error_message=HELD_ERROR_MESSAGE,
+                    )
+                    completed = True
+                    logger.error(
+                        f"[FAILED] Job {job_id}: output files not accepted; error held for review "
+                        f"({held_text_digest(str(files_error))})"
+                    )
+                    return False
+
                 # Submit to ATL if enabled and attestation is present. Pass
                 # the committed job_id so the HA entry pairs with the prior
                 # Commitment in the public log. Propagate the receipt back
@@ -609,6 +689,8 @@ class ExecutorWorker(ExecutorWorkerBase):
                     kind='result',
                     content=content,
                     attested_output_hash=attested_output_hash,
+                    files=held_files,
+                    files_manifest_sha256=files_manifest_sha256,
                     attestation=result.attestation,
                     verification_receipt=verification_receipt,
                     execution_metrics=result.step_timing,
