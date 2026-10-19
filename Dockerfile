@@ -13,8 +13,8 @@ RUN git config --global init.templateDir ''
 
 WORKDIR /app
 
-# Install epsilon-attestation-verifier from PyPI
-RUN pip install --no-cache-dir epsilon-attestation-verifier
+# Install epsilon-attestation-verifier from its release tag (1.2.0 accepts 1024-byte user_data)
+RUN pip install --no-cache-dir "git+https://github.com/Epsilon-Data/epsilon-attestation-verifier@v1.2.0"
 
 # Copy package definition first for better layer caching
 COPY pyproject.toml .
