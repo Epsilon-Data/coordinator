@@ -7,7 +7,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from shared.output_manifest import FILE_TYPES, build_manifest, canonical_manifest_bytes, file_type, manifest_sha256
+from shared.output_manifest import (
+    FILE_TYPES,
+    build_manifest,
+    canonical_manifest_bytes,
+    file_type,
+    manifest_sha256,
+    valid_file_name,
+)
 from workers.executor.output_files import (
     LocalOutputFileStore,
     OutputFileIntegrityError,
@@ -33,6 +40,9 @@ KAT_CANONICAL = (
     '"size":8,"type":"text/csv"}]'
 )
 KAT_MANIFEST_SHA256 = 'd08591bd256caf6b90ca0e00be715ae8ea97014bc8d71f8fcfc31e9ed6ea9140'
+# Known-answer vector with a subfolder and files of unknown type: a.csv, plots/fig.bin and notes
+PATHS_FILES = {'a.csv': b'x,y\n1,2\n', 'plots/fig.bin': b'\x00\x01\x02', 'notes': b'hi\n'}
+PATHS_MANIFEST_SHA256 = '49f15dcc85c70e4712ab20edd5e118eb3ea2526e264da93628522a3a6c456907'
 EMPTY_MANIFEST_SHA256 = '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945'  # sha256 of "[]"
 LIMITS = {'max_files': 20, 'max_total_bytes': 10 * 1024 * 1024}
 
@@ -70,6 +80,16 @@ class TestManifest:
         assert canonical_manifest_bytes(manifest) == KAT_CANONICAL.encode()
         assert manifest_sha256(manifest) == KAT_MANIFEST_SHA256
 
+    def test_known_answer_vector_with_paths_and_unknown_types(self):
+        manifest = build_manifest(
+            {'name': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'type': file_type(name)}
+            for name, data in PATHS_FILES.items()
+        )
+        assert [(e['name'], e['type']) for e in manifest] == [
+            ('a.csv', 'text/csv'), ('notes', 'application/octet-stream'), ('plots/fig.bin', 'application/octet-stream'),
+        ]
+        assert manifest_sha256(manifest) == PATHS_MANIFEST_SHA256
+
     def test_no_files_is_the_hash_of_an_empty_list(self):
         assert canonical_manifest_bytes([]) == b'[]'
         assert manifest_sha256([]) == EMPTY_MANIFEST_SHA256
@@ -81,8 +101,24 @@ class TestManifest:
         }
         assert file_type('Plot.PNG') == 'image/png'
         assert file_type('archive.tar.csv') == 'text/csv'
-        assert file_type('script.py') is None
-        assert file_type('noext') is None
+        assert file_type('plots/Fig.JPEG') == 'image/jpeg'
+        assert file_type('script.py') == 'application/octet-stream'
+        assert file_type('noext') == 'application/octet-stream'
+        assert file_type('data.csv/raw') == 'application/octet-stream'
+        assert file_type('trailing.') == 'application/octet-stream'
+
+    @pytest.mark.parametrize('name', [
+        'a', 'notes.txt', 'plots/fig1.png', 'a/b/c/d/e.bin', 'x' * 100, '/'.join(['y' * 50] * 5),
+    ])
+    def test_valid_names(self, name):
+        assert valid_file_name(name)
+
+    @pytest.mark.parametrize('name', [
+        '', '.hidden', 'a/.hidden', '../x', 'a/../b', './a', 'a/./b', '/a', 'a/', 'a//b', 'a b', 'x' * 101,
+        'a/b/c/d/e/f', '/'.join(['y' * 52] * 5), 'a\\b', 'x.csv\n', 'caf\u00e9.csv', 5, None,
+    ])
+    def test_invalid_names(self, name):
+        assert not valid_file_name(name)
 
 
 class TestVerifyOutputFiles:
@@ -133,19 +169,37 @@ class TestVerifyOutputFiles:
         verified = _verify(_payload([_entry('notes.txt', NOTES)]), attested=None, attestation_present=False)
         assert [f.name for f in verified.files] == ['notes.txt']
 
-    @pytest.mark.parametrize('name', ['', '.hidden.csv', '../x.csv', 'a/b.csv', 'a b.csv', 'x' * 97 + '.csv', 'x.csv\n', 5])
+    @pytest.mark.parametrize('name', [
+        '', '.hidden.csv', '../x.csv', 'a/../b.csv', 'a//b.csv', '/a.csv', 'a/', 'a b.csv', 'x' * 97 + '.csv',
+        'a/b/c/d/e/f.csv', '/'.join(['y' * 52] * 5), 'x.csv\n', 5,
+    ])
     def test_invalid_names_are_rejected(self, name):
         with pytest.raises(OutputFilesError, match='invalid name'):
             _verify(_payload([dict(_entry('notes.txt', NOTES), name=name)]))
 
-    @pytest.mark.parametrize('name', ['run.py', 'data.CSV.exe', 'README'])
-    def test_disallowed_extensions_are_rejected(self, name):
-        with pytest.raises(OutputFilesError, match='extension not allowed'):
-            _verify(_payload([dict(_entry('notes.txt', NOTES), name=name)]))
+    def test_subfolders_and_unknown_types_are_accepted(self):
+        payload = _payload([_entry(name, data) for name, data in PATHS_FILES.items()])
 
-    def test_a_type_not_matching_the_extension_is_rejected(self):
+        verified = _verify(payload)
+
+        assert verified.manifest_sha256 == PATHS_MANIFEST_SHA256
+        assert [(f.name, f.content_type, f.content) for f in verified.files] == [
+            ('a.csv', 'text/csv', PATHS_FILES['a.csv']),
+            ('notes', 'application/octet-stream', PATHS_FILES['notes']),
+            ('plots/fig.bin', 'application/octet-stream', PATHS_FILES['plots/fig.bin']),
+        ]
+
+    @pytest.mark.parametrize('name', ['run.py', 'data.CSV.exe', 'README', 'bin/tool'])
+    def test_any_extension_is_served_as_octet_stream(self, name):
+        (f,) = _verify(_payload([_entry(name, NOTES)])).files
+        assert f.content_type == 'application/octet-stream'
+
+    @pytest.mark.parametrize('name, claimed', [
+        ('notes.txt', 'text/html'), ('run.py', 'text/x-python'), ('plots/fig.bin', 'image/png'), ('chart.png', None),
+    ])
+    def test_a_type_not_matching_the_table_is_rejected(self, name, claimed):
         with pytest.raises(OutputFilesError, match='type does not match'):
-            _verify(_payload([_entry('notes.txt', NOTES, type='text/html')]))
+            _verify(_payload([_entry(name, NOTES, type=claimed)]))
 
     def test_duplicate_names_are_rejected(self):
         with pytest.raises(OutputFilesError, match='duplicate name'):
@@ -196,12 +250,36 @@ class TestCollectOutputFiles:
         with pytest.raises(OutputFilesError, match='^Output files rejected: outputs is not a directory'):
             self._collect(tmp_path / 'outputs')
 
+    def test_subfolders_are_walked_and_empty_ones_ignored(self, tmp_path):
+        for name, data in PATHS_FILES.items():
+            (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / name).write_bytes(data)
+        (tmp_path / 'empty' / 'deeper').mkdir(parents=True)
+        (tmp_path / 'a' / 'b' / 'c' / 'd' / 'e' / 'f').mkdir(parents=True)
+
+        payload = self._collect(tmp_path)
+
+        assert payload == _payload([_entry(name, PATHS_FILES[name]) for name in sorted(PATHS_FILES)])
+        assert payload['files_manifest_sha256'] == PATHS_MANIFEST_SHA256
+
+    def test_the_deepest_allowed_path_is_collected(self, tmp_path):
+        (tmp_path / 'a' / 'b' / 'c' / 'd').mkdir(parents=True)
+        (tmp_path / 'a' / 'b' / 'c' / 'd' / 'e.bin').write_bytes(b'x')
+        assert [f['name'] for f in self._collect(tmp_path)['files']] == ['a/b/c/d/e.bin']
+
     @pytest.mark.parametrize('make, reason', [
-        (lambda p: os.symlink(p / 'notes.txt', p / 'link.txt'), 'symlink not allowed'),
-        (lambda p: (p / 'nested').mkdir(), 'subdirectory not allowed'),
+        (lambda p: os.symlink(p / 'notes.txt', p / 'link.txt'), "symlink not allowed: 'link.txt'"),
+        (lambda p: os.symlink(p, p / 'loop'), "symlink not allowed: 'loop'"),
+        (lambda p: ((p / 'sub').mkdir(), os.symlink(p / 'notes.txt', p / 'sub' / 'link')),
+         "symlink not allowed: 'sub/link'"),
+        (lambda p: ((p / 'sub').mkdir(), os.symlink('/etc', p / 'sub' / 'etc')), "symlink not allowed: 'sub/etc'"),
         (lambda p: os.mkfifo(p / 'pipe.txt'), 'not a regular file'),
-        (lambda p: (p / 'run.sh').write_bytes(b'x'), 'extension not allowed'),
+        (lambda p: ((p / 'sub').mkdir(), os.mkfifo(p / 'sub' / 'pipe')), "not a regular file: 'sub/pipe'"),
         (lambda p: (p / '.hidden.txt').write_bytes(b'x'), 'invalid name'),
+        (lambda p: ((p / '.git').mkdir(), (p / '.git' / 'HEAD').write_bytes(b'x')), 'invalid name'),
+        (lambda p: ((p / 'a b').mkdir(), (p / 'a b' / 'x.csv').write_bytes(b'x')), 'invalid name'),
+        (lambda p: ((p / 'a/b/c/d/e').mkdir(parents=True), (p / 'a/b/c/d/e/f.csv').write_bytes(b'x')),
+         'invalid name'),
     ])
     def test_entries_breaking_the_rules_are_rejected(self, tmp_path, make, reason):
         (tmp_path / 'notes.txt').write_bytes(NOTES)
@@ -209,9 +287,17 @@ class TestCollectOutputFiles:
         with pytest.raises(OutputFilesError, match=f'^Output files rejected: .*{reason}'):
             self._collect(tmp_path)
 
+    def test_any_file_type_is_collected(self, tmp_path):
+        (tmp_path / 'run.sh').write_bytes(b'#!/bin/sh\n')
+        (tmp_path / 'model.pkl').write_bytes(b'\x80\x04')
+        assert [(f['name'], f['type']) for f in self._collect(tmp_path)['files']] == [
+            ('model.pkl', 'application/octet-stream'), ('run.sh', 'application/octet-stream'),
+        ]
+
     def test_limits_are_enforced(self, tmp_path):
         (tmp_path / 'a.txt').write_bytes(b'x' * 6)
-        (tmp_path / 'b.txt').write_bytes(b'y' * 5)
+        (tmp_path / 'sub').mkdir()
+        (tmp_path / 'sub' / 'b.bin').write_bytes(b'y' * 5)
         with pytest.raises(OutputFilesError, match='2 files, at most 1'):
             self._collect(tmp_path, max_files=1)
         with pytest.raises(OutputFilesError, match='exceed 10 bytes'):

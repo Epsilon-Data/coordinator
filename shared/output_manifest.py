@@ -10,10 +10,10 @@ hash into the attestation user_data.
 import hashlib
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
-# Allowed extensions (lower-cased, after the last dot) and the type each file is served as.
-# Identical in every repo.
+# The type a file is served as, by its lower-cased extension (after the last dot of the last
+# path segment); any other extension, or none, is DEFAULT_FILE_TYPE. Identical in every repo.
 FILE_TYPES = {
     'csv': 'text/csv',
     'png': 'image/png',
@@ -24,15 +24,24 @@ FILE_TYPES = {
     'pdf': 'application/pdf',
 }
 
-FILE_NAME_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
+DEFAULT_FILE_TYPE = 'application/octet-stream'
+
+# A name is the file's path relative to outputs/: 1 to 5 segments joined by '/', at most 255 characters
+FILE_NAME_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}(/[A-Za-z0-9][A-Za-z0-9._-]{0,99}){0,4}')
+MAX_FILE_NAME_LENGTH = 255
 SHA256_PATTERN = re.compile(r'[0-9a-f]{64}')
 
 
-def file_type(name: str) -> Optional[str]:
-    """The type a file of this name is served as, or None when its extension is not allowed."""
-    if '.' not in name:
-        return None
-    return FILE_TYPES.get(name.rsplit('.', 1)[1].lower())
+def valid_file_name(name: Any) -> bool:
+    return isinstance(name, str) and len(name) <= MAX_FILE_NAME_LENGTH and FILE_NAME_PATTERN.fullmatch(name) is not None
+
+
+def file_type(name: str) -> str:
+    """The type a file of this name is served as."""
+    segment = name.rsplit('/', 1)[-1]
+    if '.' not in segment:
+        return DEFAULT_FILE_TYPE
+    return FILE_TYPES.get(segment.rsplit('.', 1)[1].lower(), DEFAULT_FILE_TYPE)
 
 
 def build_manifest(entries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

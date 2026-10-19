@@ -511,8 +511,11 @@ class TestEnclaveClientLocalOutputFiles:
 
     @pytest.mark.parametrize('script, reason', [
         ("os.symlink('/etc/hosts', os.path.join(out, 'hosts.txt'))", 'symlink not allowed'),
-        ("os.mkdir(os.path.join(out, 'nested'))", 'subdirectory not allowed'),
-        ("open(os.path.join(out, 'model.pkl'), 'wb').close()", 'extension not allowed'),
+        ("os.mkdir(os.path.join(out, 'sub')); os.symlink('/etc', os.path.join(out, 'sub', 'etc'))",
+         "symlink not allowed: 'sub/etc'"),
+        ("os.mkdir(os.path.join(out, 'sub')); os.mkfifo(os.path.join(out, 'sub', 'pipe'))", 'not a regular file'),
+        ("os.makedirs(os.path.join(out, 'a/b/c/d/e')); open(os.path.join(out, 'a/b/c/d/e/f.csv'), 'w').close()",
+         'invalid name'),
         ("open(os.path.join(out, '-x.csv'), 'w').close()", 'invalid name'),
         ("[open(os.path.join(out, f'{i}.txt'), 'w').close() for i in range(3)]", '3 files, at most 2'),
         ("open(os.path.join(out, 'big.txt'), 'wb').write(b'x' * (1024 * 1024 + 1))", 'exceed 1048576 bytes'),
@@ -528,6 +531,24 @@ class TestEnclaveClientLocalOutputFiles:
         assert output.startswith('Output files rejected: ')
         assert reason in output
         attest.assert_not_called()
+
+    def test_files_in_subfolders_of_any_type_are_returned(self, client, attest):
+        script = (
+            "import os\n"
+            "out = os.environ['EPSILON_OUTPUT_DIR']\n"
+            "os.makedirs(os.path.join(out, 'plots', 'raw'))\n"
+            "os.makedirs(os.path.join(out, 'empty'))\n"
+            "open(os.path.join(out, 'plots', 'raw', 'fig.bin'), 'wb').write(bytes([0, 1, 2]))\n"
+            "open(os.path.join(out, 'model.pkl'), 'wb').write(b'pkl')\n"
+        )
+        success, _output, _attestation, files = self._run(client, _bundle(script))
+
+        assert success is True
+        assert [(f['name'], f['type'], base64.b64decode(f['content_b64'])) for f in files['files']] == [
+            ('model.pkl', 'application/octet-stream', b'pkl'),
+            ('plots/raw/fig.bin', 'application/octet-stream', b'\x00\x01\x02'),
+        ]
+        assert self._user_data(attest)['files_manifest_sha256'] == manifest_sha256(build_manifest(files['files']))
 
     def test_the_db_fetch_path_returns_the_files(self, client):
         success, _output, attestation, files = self._run(client, _bundle(FILES_SCRIPT), db_fetch=True)

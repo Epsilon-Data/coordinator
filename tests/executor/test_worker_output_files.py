@@ -165,6 +165,24 @@ class TestAcceptedFiles:
         assert (store_dir / 'jobs' / JOB_ID / _sha256(TABLE)).read_bytes() == TABLE
         _assert_never_logged(caplog)
 
+    def test_files_in_subfolders_of_any_type_are_stored_by_hash_and_held_by_path(self, worker, executor, repo, store_dir):
+        fig = b'\x00\x01\x02'
+        files = _files(_entry('table.csv', TABLE), _entry('plots/raw/fig.bin', fig))
+        manifest = files['files_manifest_sha256']
+
+        assert _run(worker, executor, files, _receipt(files_manifest_sha256=manifest)) is True
+
+        call_ = repo.complete_job_with_held_output.call_args
+        assert call_.kwargs['files_manifest_sha256'] == manifest
+        assert call_.kwargs['files'][0] == {
+            'name': 'plots/raw/fig.bin', 'size': 3, 'content_type': 'application/octet-stream',
+            'sha256': _sha256(fig), 'storage_key': f'jobs/{JOB_ID}/{_sha256(fig)}',
+        }
+        assert (store_dir / 'jobs' / JOB_ID / _sha256(fig)).read_bytes() == fig
+        assert sorted(p.relative_to(store_dir).as_posix() for p in store_dir.rglob('*') if p.is_file()) == sorted(
+            f'jobs/{JOB_ID}/{_sha256(data)}' for data in (TABLE, fig)
+        )
+
     def test_an_old_enclave_without_files_holds_no_manifest(self, worker, executor, repo, store_dir):
         assert _run(worker, executor, None, _receipt()) is True
 
