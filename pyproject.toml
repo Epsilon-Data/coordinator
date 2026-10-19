@@ -10,7 +10,7 @@ requires-python = ">=3.9"
 
 # Core dependencies (all workers need these)
 dependencies = [
-    "sqlalchemy>=2.0",
+    "sqlalchemy>=2.0,<2.1",  # 2.1 maps postgresql:// to psycopg v3, which is not installed
     "psycopg2-binary>=2.9.6",
     "python-dotenv>=1.0.0",
     "alembic>=1.13.0",
