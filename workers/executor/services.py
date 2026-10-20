@@ -214,8 +214,17 @@ class ZipService:
     def __init__(self, exclude_patterns: Set[str] = None):
         self.exclude_patterns = exclude_patterns or self.DEFAULT_EXCLUDES
 
+    # Fixed entry metadata so the same files always give the same bytes; the enclave attests
+    # SHA-256 of this archive as script_hash, and `epsilon-verify code-digest` rebuilds it from a commit.
+    ENTRY_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+    ENTRY_MODE = 0o100644
+
     def zip_directory(self, directory_path: str) -> ZipResult:
-        """Create a ZIP archive of a directory in memory (no temp file I/O)."""
+        """Create a deterministic ZIP archive of a directory in memory (no temp file I/O).
+
+        Entries are sorted by their POSIX path and stored uncompressed with a fixed timestamp and
+        mode, so the archive depends only on the files' paths and contents.
+        """
         dir_path = Path(directory_path)
 
         if not dir_path.exists():
@@ -234,30 +243,37 @@ class ZipService:
 
         resolved_root = dir_path.resolve()
 
-        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file_path in dir_path.rglob('*'):
-                if file_path.is_file() and not self._should_exclude(file_path):
-                    # Prevent symlink escape: resolved path must stay inside root
-                    if not file_path.resolve().is_relative_to(resolved_root):
-                        logger.warning(f"Skipping file outside build dir: {file_path}")
-                        continue
-                    try:
-                        arcname = file_path.relative_to(dir_path)
-                        file_size = file_path.stat().st_size
-                        zipf.write(file_path, arcname)
-                        files_added += 1
-                        total_size += file_size
-                        logger.debug(f"Added: {arcname} ({file_size} bytes)")
-                        # Check accumulated zip size against limit
-                        if buffer.tell() > self.MAX_BUILD_SIZE:
-                            raise ValueError(
-                                f"Build archive exceeds maximum size of "
-                                f"{self.MAX_BUILD_SIZE // (1024 * 1024)} MB"
-                            )
-                    except ValueError:
-                        raise
-                    except Exception as e:
-                        logger.warning(f"Failed to add {file_path}: {e}")
+        entries = []
+        for file_path in dir_path.rglob('*'):
+            if file_path.is_file() and not self._should_exclude(file_path):
+                # Prevent symlink escape: resolved path must stay inside root
+                if not file_path.resolve().is_relative_to(resolved_root):
+                    logger.warning(f"Skipping file outside build dir: {file_path}")
+                    continue
+                entries.append((file_path.relative_to(dir_path).as_posix(), file_path))
+        entries.sort()
+
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as zipf:
+            for arcname, file_path in entries:
+                try:
+                    file_size = file_path.stat().st_size
+                    info = zipfile.ZipInfo(arcname, date_time=self.ENTRY_DATE_TIME)
+                    info.create_system = 3
+                    info.external_attr = self.ENTRY_MODE << 16
+                    zipf.writestr(info, file_path.read_bytes())
+                    files_added += 1
+                    total_size += file_size
+                    logger.debug(f"Added: {arcname} ({file_size} bytes)")
+                    # Check accumulated zip size against limit
+                    if buffer.tell() > self.MAX_BUILD_SIZE:
+                        raise ValueError(
+                            f"Build archive exceeds maximum size of "
+                            f"{self.MAX_BUILD_SIZE // (1024 * 1024)} MB"
+                        )
+                except ValueError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Failed to add {file_path}: {e}")
 
         zip_data = buffer.getvalue()
 
