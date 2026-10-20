@@ -419,6 +419,18 @@ class TestProxyModeGuard:
         proxy.fetch_encrypted_csv.assert_called_once()
         assert proxy.fetch_encrypted_csv.call_args.kwargs['request'].dataset_id.lower() == PROJECT_ID
 
+    def test_the_enclave_attests_its_own_session_key(self, worker, middleware, proxy, enclave):
+        # The host names the session; it never hands the enclave a key or user_data to sign
+        middleware.fetch_encrypted_csv.return_value = self._proxy_response()
+        enclave._send_to_enclave.return_value = {'attestation': {'attestation_document': 'ZG9j'}}
+        proxy.fetch_encrypted_csv.return_value = MagicMock(encrypted_csv='ZW5j', metadata={})
+
+        assert worker.process_job(_job()) is True
+
+        enclave._send_to_enclave.assert_called_once_with(
+            {'operation': 'get_attestation', 'session_id': 'session_123'}
+        )
+
 
 class TestAccessCheckDisabled:
     def test_disabled_with_the_local_enclave_skips_the_check_but_records_the_project(

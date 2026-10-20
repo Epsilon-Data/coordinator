@@ -9,7 +9,6 @@ Flow:
 4. Package and encrypt build folder
 5. Send encrypted payloads to enclave for execution
 """
-import json
 import os
 import re
 import secrets
@@ -332,7 +331,7 @@ class SecureExecutor(IExecutor):
                 if proxy_info.sql_query:
                     _validate_sql_query(proxy_info.sql_query)
                 proxy_response, proxy_timing = self._step_fetch_from_proxy(
-                    job_id, request, public_key, proxy_info
+                    job_id, request, public_key, session_id, proxy_info
                 )
                 step_timing['proxy_fetch_ms'] = round((time.time() - t0) * 1000, 2)
                 step_timing['proxy_detail'] = proxy_timing
@@ -546,7 +545,7 @@ class SecureExecutor(IExecutor):
 
     def _step_fetch_from_proxy(
         self, job_id: str, request: JobExecutionRequest,
-        public_key: str, proxy_info: ProxyInfo
+        public_key: str, session_id: str, proxy_info: ProxyInfo
     ):
         """Step 5a (proxy): Fetch encrypted CSV through proxy tunnel.
 
@@ -563,14 +562,14 @@ class SecureExecutor(IExecutor):
         timings = {}
 
         try:
-            # Stage A: Get attestation document from enclave (with public key bound in user_data).
+            # Stage A: Get attestation document from enclave. The enclave binds the public key of
+            # its own session into user_data; the host cannot choose which key gets attested.
             t_attest = time.time()
             attestation_doc = ""
             try:
-                user_data_json = json.dumps({"public_key": public_key})
                 attestation_response = self._enclave_client._send_to_enclave({
                     'operation': EnclaveOperations.GET_ATTESTATION,
-                    'user_data': user_data_json
+                    'session_id': session_id
                 })
                 if attestation_response.get('attestation'):
                     attestation_doc = attestation_response['attestation'].get('attestation_document', '')
