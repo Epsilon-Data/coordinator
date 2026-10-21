@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0](https://github.com/Epsilon-Data/coordinator/compare/v1.3.4...v1.4.0) (2026-10-21)
+
+
+### Features
+
+* accept output files of any type in subfolders ([f2521f9](https://github.com/Epsilon-Data/coordinator/commit/f2521f9bd81949d4988a8ad49227c5f0ed2cd5a1))
+* accept output files of any type in subfolders of outputs/ ([356ceb4](https://github.com/Epsilon-Data/coordinator/commit/356ceb4e83d057873bc35c82c977dbf9def6e27f))
+* add ATL (Attestation Transparency Log) integration ([a28dd6d](https://github.com/Epsilon-Data/coordinator/commit/a28dd6d7add5441d235fa7a161946434ccebe2e2))
+* add ATL (Attestation Transparency Log) integration ([a0c014c](https://github.com/Epsilon-Data/coordinator/commit/a0c014cde9d1bc55081b33a0a5d8faf2ec2a55e7))
+* add end-to-end TDX backend demo/smoke-test driver ([d45dfea](https://github.com/Epsilon-Data/coordinator/commit/d45dfea3b4d24e80457fdc2115fbd7fe658b65f7))
+* add Intel TDX enclave-client backend and self-hosted TDX quote verifier ([30dc87f](https://github.com/Epsilon-Data/coordinator/commit/30dc87f259687eeed1c2ac62d609ee0bed541aed))
+* **ai-agent:** add data privacy review to analyzer and decision prompts ([a13051a](https://github.com/Epsilon-Data/coordinator/commit/a13051a5a08c2f84621a4e81054e330be0453c05))
+* **atl_client:** add Commitment entry submission methods ([8f2a41f](https://github.com/Epsilon-Data/coordinator/commit/8f2a41fc4921326ce88d4b739bca0c6d7cbfc7a6))
+* **bench:** end-to-end Table 5 measurement script (B6) ([b145023](https://github.com/Epsilon-Data/coordinator/commit/b145023695819e96773315e6d842d1152666d394))
+* commitment-then-dispatch protocol + JAC artifacts ([2cf6c9e](https://github.com/Epsilon-Data/coordinator/commit/2cf6c9e628f4415937b0abccaed63321a4f4ad70))
+* **crypto:** use AES-256-GCM with tag verification for hybrid payload ([26cd804](https://github.com/Epsilon-Data/coordinator/commit/26cd80458828fcea77d69e840480189523d588e9))
+* **crypto:** use AES-256-GCM with tag verification for hybrid payload ([c3f5d7b](https://github.com/Epsilon-Data/coordinator/commit/c3f5d7b27a7e437d060ac920009afafaecccbfc0))
+* **db:** add job_id_committed and researcher_nonce columns ([508cc80](https://github.com/Epsilon-Data/coordinator/commit/508cc80148bb9ff90c9af527fa95025eafcec395))
+* **db:** hold output files with their manifest hash ([be5f4d8](https://github.com/Epsilon-Data/coordinator/commit/be5f4d8ee8fa0333a096b78bab4193dcb873241d))
+* **db:** persist ATL inclusion receipts on job_requests ([df8b4be](https://github.com/Epsilon-Data/coordinator/commit/df8b4be0f9bb2d3647ed79c2f0ea23a10ed5e806))
+* **executor:** check enclave output files against the attestation and hold them ([af9216d](https://github.com/Epsilon-Data/coordinator/commit/af9216d946842b498dcf254f2db5277b1d8e3f58))
+* **executor:** check project access and route output to project reviewers ([7daa173](https://github.com/Epsilon-Data/coordinator/commit/7daa173df600cc2e84237b510abe8a720e7140c6))
+* **executor:** commitment-then-dispatch in Step 4b (sprint A3) ([27220f0](https://github.com/Epsilon-Data/coordinator/commit/27220f0ed3a00a4d4b8b83b4a38fcb9a9cba6b1e))
+* **executor:** decompose proxy fetch into sub-stage timings ([bf60d5e](https://github.com/Epsilon-Data/coordinator/commit/bf60d5ef127fd68fb8bd6f16c1b37c513275a300))
+* **executor:** decompose proxy fetch into sub-stage timings ([1830d75](https://github.com/Epsilon-Data/coordinator/commit/1830d75f93c2827afdcfbbdf6caed605897540e2))
+* **executor:** forward atl_nonce and atl_context_hash to enclave (C1, coord side) ([b865ba6](https://github.com/Epsilon-Data/coordinator/commit/b865ba641a7690c4904bc568939251396f74e97d))
+* **executor:** hold real-data output for reviewer release ([12408f8](https://github.com/Epsilon-Data/coordinator/commit/12408f8a291a63b7ceb652b2131e7084e0d0391e))
+* **executor:** output-release gate with project reviewers ([17d7aa4](https://github.com/Epsilon-Data/coordinator/commit/17d7aa45ff36a1dfc1429b3385f5e19434739405))
+* **executor:** plumb JAC artifacts through ExecutionResult and worker (A5) ([69792a0](https://github.com/Epsilon-Data/coordinator/commit/69792a0cf0ea7e86128aee54580828dc547b7c44))
+* **executor:** produce output files from the local enclave ([1658b9d](https://github.com/Epsilon-Data/coordinator/commit/1658b9d2b81078624fec555bd78747d63a45cb54))
+* **executor:** verify output files and store them in s3 or locally ([c2f1bd6](https://github.com/Epsilon-Data/coordinator/commit/c2f1bd61e93ea1fdd108fb32fd32f924e04f83da))
+* hold attested output files for review ([28be22d](https://github.com/Epsilon-Data/coordinator/commit/28be22d8ce04a547c899a23f8aa270a2094ec4c7))
+* merge sprint commitment-then-dispatch into main ([665e458](https://github.com/Epsilon-Data/coordinator/commit/665e458e04bddee64e8de7ae8837e6a4102c4c04))
+
+
+### Bug Fixes
+
+* ask the enclave to attest its own session key ([e2fbeaf](https://github.com/Epsilon-Data/coordinator/commit/e2fbeafc8ac61dd3eb6552e7fce11312778575af))
+* ask the enclave to attest its own session key ([9ce8367](https://github.com/Epsilon-Data/coordinator/commit/9ce8367c4b4c953a7ff593f2ea386d72a5b8818c))
+* build the code bundle deterministically so script_hash is reproducible ([cdeb5c7](https://github.com/Epsilon-Data/coordinator/commit/cdeb5c71b72fffa7e0f1088b34f695c4c1c81618))
+* build the code bundle deterministically so script_hash is reproducible ([ce28c4d](https://github.com/Epsilon-Data/coordinator/commit/ce28c4da63da56f64f7e400245494a329b9b41be))
+* **deps:** add cbor2 and httpx to executor extras ([5245e17](https://github.com/Epsilon-Data/coordinator/commit/5245e1762a6a02abbfef1869eb7b044f81053b54))
+* **deps:** add cbor2 and httpx to executor extras ([27744cc](https://github.com/Epsilon-Data/coordinator/commit/27744cc358ad51910da1d1e598a94a6deeeb4653))
+* **deps:** pin sqlalchemy below 2.1 ([3cd2108](https://github.com/Epsilon-Data/coordinator/commit/3cd2108ebe764068efd8b61fb5d40999a943e19e))
+* **deps:** pin sqlalchemy below 2.1 so postgresql:// uses psycopg2 ([0f9cce5](https://github.com/Epsilon-Data/coordinator/commit/0f9cce502f6634bdafce6bc80ffeac86e7c402d6))
+* **executor:** accept ATL arguments in the local enclave client ([80551dd](https://github.com/Epsilon-Data/coordinator/commit/80551dd327cf918510a5f32a02a4fcb062d3a1f5))
+* **executor:** claim jobs only when enclave is ready and recover orphans ([0ba5f3d](https://github.com/Epsilon-Data/coordinator/commit/0ba5f3d5b6248550d5752def861086410d1fd3da))
+* **executor:** enclave readiness, local enclave and AI privacy review ([16375be](https://github.com/Epsilon-Data/coordinator/commit/16375be6b5842bd4ed7b2de27382d36084be38bf))
+* **executor:** length-prefix vsock requests to fix large-payload stall ([058e9d6](https://github.com/Epsilon-Data/coordinator/commit/058e9d6fc281c1a754f72c4d2a1a532fb7ad271f))
+* **executor:** read length-prefixed enclave replies ([16ae5d7](https://github.com/Epsilon-Data/coordinator/commit/16ae5d7e129f75d6528cb28f833e91083ef9ed87))
+* **executor:** strip length-prefix header from enclave VSock response ([b87442a](https://github.com/Epsilon-Data/coordinator/commit/b87442a7c61659a98c41c6b03540d651a5298ad7))
+* **executor:** strip length-prefix header from enclave VSock response ([09b0ae3](https://github.com/Epsilon-Data/coordinator/commit/09b0ae3dba0849a5140d9092754c968abb1c1b17))
+* keep tdverify stdout pure JSON (silence go-tdx-guest logger; tolerant parse) ([7938427](https://github.com/Epsilon-Data/coordinator/commit/7938427564b73c05fb33b8185709a5c53b10d629))
+* pass researcher_nonce from DB to JobExecutionRequest ([2f6495f](https://github.com/Epsilon-Data/coordinator/commit/2f6495f4d2d3f56256128167b28eeadb721a93c9))
+* pass researcher_nonce from DB to JobExecutionRequest ([cda76d1](https://github.com/Epsilon-Data/coordinator/commit/cda76d19e36eb9c9b5ed30675b72dd6407f18041))
+* pin go-tdx-guest to v0.3.1 (v0.3.2 tag does not exist) ([84bb879](https://github.com/Epsilon-Data/coordinator/commit/84bb8794a548c2391add6e539e1afc0769377f0f))
+
+
+### Documentation
+
+* fix architecture diagram, data flow, encryption model, and LLM reference ([716d272](https://github.com/Epsilon-Data/coordinator/commit/716d272fae334083b077ed47875005a6723222f6))
+* fix overall pipeline diagram - AI agent runs in parallel ([81d836f](https://github.com/Epsilon-Data/coordinator/commit/81d836f110ef2923a9916f060d009c448d1d0ab9))
+
 ## [1.3.4](https://github.com/Epsilon-Data/coordinator/compare/v1.3.3...v1.3.4) (2026-03-30)
 
 
