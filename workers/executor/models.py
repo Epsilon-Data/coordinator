@@ -38,6 +38,10 @@ class JobExecutionRequest(BaseModel):
         default=False, description="If True, dispatch when ATL is unreachable (marks job Non-Compliant)"
     )
 
+    attempt_id: Optional[str] = Field(
+        default=None, description="Identifier of this execution attempt, recorded on the job before dispatch"
+    )
+
     model_config = {"frozen": False, "extra": "ignore"}
 
     @field_validator("job_id", "repo_path")

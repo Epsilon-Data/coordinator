@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from workers.executor.settings import Settings
+from workers.executor.attempts import enclave_identifier
 from workers.executor.constants import EnclaveOperations, MiddlewareModes
 from workers.executor.interfaces import IEnclaveClient, IExecutor, IMiddlewareClient, MiddlewareRequest, MiddlewareResponse, ProxyInfo, ProxyResponse
 from workers.executor.jac import (
@@ -169,6 +170,13 @@ class SecureExecutor(IExecutor):
             t0 = time.time()
             encrypted_zip = self._step_zip_and_encrypt(job_id, request.repo_path, public_key)
             step_timing['zip_and_encrypt_ms'] = round((time.time() - t0) * 1000, 2)
+
+            # The enclave signs the platform job id and this attempt's id into its record
+            # of the run. An id it would refuse is not sent (attempts.enclave_identifier).
+            run_identifiers = {
+                'platform_job_id': enclave_identifier(job_id),
+                'attempt_id': enclave_identifier(request.attempt_id),
+            }
 
             # Step 4b: JAC + Commitment (commitment-then-dispatch).
             # Paper §3.4.1, §4.2: the central protocol contribution. Sign a
@@ -338,7 +346,7 @@ class SecureExecutor(IExecutor):
                 t0 = time.time()
                 success, output, attestation, enclave_timing, output_files = self._step_execute_in_enclave(
                     job_id, session_id, encrypted_zip, proxy_response.encrypted_csv,
-                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
+                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash, **run_identifiers,
                 )
             elif middleware_response and middleware_response.is_direct_db:
                 # Validate SQL query before sending to enclave
@@ -347,13 +355,13 @@ class SecureExecutor(IExecutor):
                     job_id, session_id, encrypted_zip,
                     middleware_response.encrypted_credentials,
                     middleware_response.sql_query,
-                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
+                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash, **run_identifiers,
                 )
             else:
                 encrypted_csv = middleware_response.encrypted_csv if middleware_response else None
                 success, output, attestation, enclave_timing, output_files = self._step_execute_in_enclave(
                     job_id, session_id, encrypted_zip, encrypted_csv,
-                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
+                    atl_nonce=atl_nonce, atl_context_hash=atl_context_hash, **run_identifiers,
                 )
             step_timing['enclave_round_trip_ms'] = round((time.time() - t0) * 1000, 2)
             if enclave_timing:
@@ -675,6 +683,8 @@ class SecureExecutor(IExecutor):
         encrypted_zip: str, encrypted_csv: Optional[str],
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> tuple:
         """Step 5: Execute in enclave. Returns (success, output, attestation, enclave_timing, output_files)."""
         self._log.info(job_id, "enclave", "Sending to enclave for execution", progress=85)
@@ -683,6 +693,7 @@ class SecureExecutor(IExecutor):
             success, output, attestation, output_files = self._enclave_client.send_encrypted_data_to_enclave(
                 session_id, encrypted_zip, encrypted_csv,
                 atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
+                platform_job_id=platform_job_id, attempt_id=attempt_id,
             )
             logger.info(f"Enclave execution completed: success={success}")
             # Extract enclave-internal timing if available
@@ -704,6 +715,8 @@ class SecureExecutor(IExecutor):
         encrypted_zip: str, encrypted_credentials: str, sql_query: str,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> tuple:
         """Step 5 (direct_db): Execute in enclave with DB fetch. Returns (success, output, attestation, enclave_timing, output_files)."""
         self._log.info(job_id, "enclave", "Sending to enclave for DB fetch execution", progress=85)
@@ -712,6 +725,7 @@ class SecureExecutor(IExecutor):
             success, output, attestation, output_files = self._enclave_client.send_encrypted_data_with_db_fetch(
                 session_id, encrypted_zip, encrypted_credentials, sql_query,
                 atl_nonce=atl_nonce, atl_context_hash=atl_context_hash,
+                platform_job_id=platform_job_id, attempt_id=attempt_id,
             )
             logger.info(f"Enclave DB fetch execution completed: success={success}")
             enclave_timing = None

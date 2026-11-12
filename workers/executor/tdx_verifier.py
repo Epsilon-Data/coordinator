@@ -16,6 +16,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from workers.executor.attempts import EXECUTION_FIELDS
+
 logger = logging.getLogger("epsilon.executor")
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +44,8 @@ class TdxVerificationResult:
     dataset_hash: Optional[str] = None
     context_hash: Optional[str] = None
     files_manifest_sha256: Optional[str] = None
+    # outcome, exit_code, error_hash, platform_job_id, attempt_id from the bound proof
+    execution_fields: Dict[str, Any] = field(default_factory=dict)
     module_id: str = "tdx"
     error: Optional[str] = None
 
@@ -126,6 +130,7 @@ def verify_tdx_attestation(
                 result.dataset_hash = bound.get("dataset_hash") or None
                 result.context_hash = bound.get("context_hash") or bound.get("atl_context_hash") or None
                 result.files_manifest_sha256 = bound.get("files_manifest_sha256") or None
+                result.execution_fields = {name: bound[name] for name in EXECUTION_FIELDS if name in bound}
             if expected_output is not None:
                 expected_output_hash = hashlib.sha256(expected_output.encode()).hexdigest()
                 if not isinstance(result.output_hash, str) or result.output_hash.lower() != expected_output_hash:

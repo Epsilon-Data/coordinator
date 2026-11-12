@@ -94,6 +94,13 @@ def _receipt(output_hash, **checks):
     })
 
 
+# A run without a signed record clears every field that describes one
+NO_RUN_RECORD = dict(
+    attestation=None, verification_receipt=None, enclave_version=None, enclave_pcr0=None,
+    analysis_outcome=None, attempt_binding=None,
+)
+
+
 def _make_worker(executor, storage_path, atl_client=None):
     # Bypass __init__: it validates the environment and touches the database.
     worker = ExecutorWorker.__new__(ExecutorWorker)
@@ -317,6 +324,7 @@ class TestFailure:
         assert MARKER not in _all_calls(atl)
         repo.complete_job_with_held_output.assert_called_once_with(
             JOB_ID, status='failed', kind='error', content=error, error_message=HELD_ERROR_MESSAGE,
+            **NO_RUN_RECORD,
         )
         assert MARKER not in repr(repo.update_job_status.call_args_list)
         _assert_never_logged(caplog)
@@ -497,7 +505,7 @@ class TestUnexpectedException:
         atl.submit_la_entry.assert_called_once_with(job_id=JOB_ID, error_class='RuntimeError', error_detail='')
         repo.complete_job_with_held_output.assert_called_once_with(
             JOB_ID, status='failed', kind='error',
-            content=f'decode failed near {MARKER}', error_message=HELD_ERROR_MESSAGE,
+            content=f'decode failed near {MARKER}', error_message=HELD_ERROR_MESSAGE, **NO_RUN_RECORD,
         )
         assert MARKER not in repr(repo.update_job_status.call_args_list)
         _assert_never_logged(caplog)
@@ -555,6 +563,7 @@ class TestHeldWriteFailures:
         assert [c.kwargs['kind'] for c in calls] == ['result', 'result', 'error']
         assert calls[2] == call(
             JOB_ID, status='failed', kind='error', content=f'second: {MARKER}', error_message=HELD_ERROR_MESSAGE,
+            **NO_RUN_RECORD,
         )
         assert [c.kwargs['status'] for c in repo.update_job_status.call_args_list] == ['executing']
         _assert_never_logged(caplog)
@@ -575,6 +584,7 @@ class TestHeldWriteFailures:
         assert placeholder == call(
             JOB_ID, status='failed', kind='error',
             content=UNSTORED_OUTPUT_MESSAGE.format(error_type='HoldError'), error_message=HELD_ERROR_MESSAGE,
+            **NO_RUN_RECORD,
         )
         assert [c.kwargs['status'] for c in repo.update_job_status.call_args_list] == ['executing']
         _assert_never_logged(caplog)
@@ -669,6 +679,30 @@ class TestVerificationReceipt:
     def test_attested_hash_is_kept_when_only_the_output_check_fails(self):
         # A genuine output mismatch: the reviewer must still see the mismatch.
         assert _attested_output_hash(_receipt('AB' * 32, output_verified=False)) == 'ab' * 32
+
+
+class TestRunIdentifiers:
+    """Real SecureExecutor: the recorded attempt and the job id reach the enclave request."""
+
+    def test_the_enclave_is_sent_the_job_id_and_the_recorded_attempt(self, secure_worker, enclave, repo):
+        enclave.send_encrypted_data_to_enclave.return_value = (True, 'count=7', None, None)
+
+        assert secure_worker.process_job(_job()) is True
+
+        recorded_attempt = repo.record_execution_attempt.call_args.args[1]
+        sent = enclave.send_encrypted_data_to_enclave.call_args.kwargs
+        assert (sent['platform_job_id'], sent['attempt_id']) == (JOB_ID, recorded_attempt)
+
+    def test_a_job_id_the_enclave_would_refuse_is_not_sent(self, secure_worker, enclave, repo, storage):
+        job_id = 'JOB RG 1'
+        (storage / 'repositories' / JOB_ID).rename(storage / 'repositories' / job_id)
+        enclave.send_encrypted_data_to_enclave.return_value = (True, 'count=7', None, None)
+
+        assert secure_worker.process_job(_job(job_id=job_id)) is True
+
+        sent = enclave.send_encrypted_data_to_enclave.call_args.kwargs
+        assert sent['platform_job_id'] is None
+        assert sent['attempt_id'] == repo.record_execution_attempt.call_args.args[1]
 
 
 class TestNothingReachesJobLogs:

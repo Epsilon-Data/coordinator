@@ -132,9 +132,17 @@ class IEnclaveClient(ABC):
         self,
         session_id: str,
         encrypted_zip: str,
-        encrypted_csv: Optional[str] = None
+        encrypted_csv: Optional[str] = None,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
-        """Send encrypted data to enclave. Returns (success, output/error, attestation, output_files)."""
+        """Send encrypted data to enclave. Returns (success, output/error, attestation, output_files).
+
+        platform_job_id and attempt_id are signed by the enclave into its record of
+        the run. A failed run returns its signed record too, when the enclave signs one.
+        """
         pass
 
     @abstractmethod
@@ -143,7 +151,11 @@ class IEnclaveClient(ABC):
         session_id: str,
         encrypted_zip: str,
         encrypted_credentials: str,
-        sql_query: str
+        sql_query: str,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
         """Send encrypted data to enclave with direct DB fetch. Returns (success, output/error, attestation, output_files)."""
         pass

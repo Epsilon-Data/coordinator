@@ -81,6 +81,25 @@ def _output_files(response: dict) -> Optional[Dict]:
     return {'files': response['files'], 'files_manifest_sha256': response.get('files_manifest_sha256')}
 
 
+def _add_run_identifiers(request: dict, platform_job_id: Optional[str], attempt_id: Optional[str]) -> None:
+    """Add the platform job id and attempt id the enclave signs into its record of the run."""
+    if platform_job_id is not None:
+        request['platform_job_id'] = platform_job_id
+    if attempt_id is not None:
+        request['attempt_id'] = attempt_id
+
+
+def _failed_run_attestation(response: dict) -> Optional[Dict]:
+    """The enclave's signed record of a failed run, or None (an older enclave signs none)."""
+    attestation = response.get('attestation')
+    if not isinstance(attestation, dict):
+        return None
+    enclave_timing = response.get('timing')
+    if enclave_timing:
+        attestation['timing'] = enclave_timing
+    return attestation
+
+
 # =============================================================================
 # Enclave Client (Production - Nitro VSock)
 # =============================================================================
@@ -131,6 +150,8 @@ class EnclaveClient(IEnclaveClient):
         encrypted_csv: Optional[str] = None,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
         """Send encrypted data to enclave for execution.
 
@@ -158,6 +179,7 @@ class EnclaveClient(IEnclaveClient):
                 request['atl_nonce'] = atl_nonce.hex()
             if atl_context_hash is not None:
                 request['atl_context_hash'] = atl_context_hash.hex()
+            _add_run_identifiers(request, platform_job_id, attempt_id)
 
             response = self._send_to_enclave(request)
 
@@ -184,7 +206,7 @@ class EnclaveClient(IEnclaveClient):
                 error_msg = response.get('error', 'Unknown error')
                 # The enclave's error text may carry real-data output; it is held for review
                 logger.error(f"[ENCLAVE] Execution failed ({held_text_digest(error_msg)})")
-                return False, error_msg, None, None
+                return False, error_msg, _failed_run_attestation(response), None
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Failed to send: {str(e)}", exc_info=True)
@@ -198,6 +220,8 @@ class EnclaveClient(IEnclaveClient):
         sql_query: str,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
         """Send encrypted data to enclave for execution with direct DB fetch.
 
@@ -226,6 +250,7 @@ class EnclaveClient(IEnclaveClient):
                 request['atl_nonce'] = atl_nonce.hex()
             if atl_context_hash is not None:
                 request['atl_context_hash'] = atl_context_hash.hex()
+            _add_run_identifiers(request, platform_job_id, attempt_id)
 
             response = self._send_to_enclave(request)
 
@@ -249,7 +274,7 @@ class EnclaveClient(IEnclaveClient):
             else:
                 error_msg = response.get('error', 'Unknown error')
                 logger.error(f"[ENCLAVE] DB fetch execution failed ({held_text_digest(error_msg)})")
-                return False, error_msg, None, None
+                return False, error_msg, _failed_run_attestation(response), None
 
         except Exception as e:
             logger.error(f"[ENCLAVE] Failed to send DB fetch request: {str(e)}", exc_info=True)
@@ -440,6 +465,8 @@ class EnclaveClientTDX(IEnclaveClient):
         encrypted_csv: Optional[str] = None,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
         """Send encrypted data to the TDX agent for execution.
 
@@ -457,6 +484,7 @@ class EnclaveClientTDX(IEnclaveClient):
             request['atl_nonce'] = atl_nonce.hex()
         if atl_context_hash is not None:
             request['atl_context_hash'] = atl_context_hash.hex()
+        _add_run_identifiers(request, platform_job_id, attempt_id)
         return self._execute(request, session_id)
 
     def send_encrypted_data_with_db_fetch(
@@ -467,6 +495,8 @@ class EnclaveClientTDX(IEnclaveClient):
         sql_query: str,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
         """Send encrypted data to the TDX agent for execution with direct DB fetch."""
         request = {
@@ -480,6 +510,7 @@ class EnclaveClientTDX(IEnclaveClient):
             request['atl_nonce'] = atl_nonce.hex()
         if atl_context_hash is not None:
             request['atl_context_hash'] = atl_context_hash.hex()
+        _add_run_identifiers(request, platform_job_id, attempt_id)
         return self._execute(request, session_id)
 
     def _execute(self, request: dict, session_id: str) -> EnclaveExecution:
@@ -490,7 +521,7 @@ class EnclaveClientTDX(IEnclaveClient):
             if not response.get('success'):
                 error_msg = response.get('error', 'Unknown error')
                 logger.error(f"[TDX] Execution failed ({held_text_digest(error_msg)})")
-                return False, error_msg, None, None
+                return False, error_msg, _failed_run_attestation(response), None
 
             attestation = response.get('attestation')
             enclave_timing = response.get('timing')
@@ -594,6 +625,8 @@ class EnclaveClientLocal(IEnclaveClient):
         encrypted_csv: Optional[str] = None,
         atl_nonce: Optional[bytes] = None,
         atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
         """Execute encrypted payloads with Zero Trust decryption.
 
@@ -696,7 +729,11 @@ class EnclaveClientLocal(IEnclaveClient):
         session_id: str,
         encrypted_zip: str,
         encrypted_credentials: str,
-        sql_query: str
+        sql_query: str,
+        atl_nonce: Optional[bytes] = None,
+        atl_context_hash: Optional[bytes] = None,
+        platform_job_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
     ) -> EnclaveExecution:
         """Local simulation of DB fetch execution.
 

@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BASE_SCHEMA = ROOT / 'tests' / 'fixtures' / 'release_gate_base_schema.sql'
 BASE_REVISION = '2e1ea7116ba4'
 GATE_REVISION = '7f3a9c2d1e4b'
-HEAD_REVISION = 'f2b7d5e9a1c4'
+HEAD_REVISION = 'a3d6f8b2c7e1'
 
 ALICE = '00000000-0000-0000-0000-0000000000a1'
 BOB = '00000000-0000-0000-0000-0000000000b2'  # reviewer of PROJECT
@@ -417,6 +417,66 @@ class TestCompleteJobWithHeldOutput:
         job = _job(engine, job_id)
         assert (job['status'], job['release_status']) == ('failed', 'pending')
         assert job['output_sha256'] == _sha256('the result')
+
+    def test_a_kept_result_keeps_its_own_signed_record(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-H-KEEP-RECORD')
+        record = dict(attestation='result attestation', verification_receipt='result receipt',
+                      enclave_version='1.7.0', enclave_pcr0='aa', analysis_outcome='succeeded', attempt_binding='bound')
+        repo.complete_job_with_held_output(
+            job_id, status='success', kind='result', content='the result',
+            attested_output_hash=_sha256('the result'), **record,
+        )
+
+        repo.complete_job_with_held_output(
+            job_id, status='failed', kind='error', content='late error', error_message=HELD_ERROR_MESSAGE,
+            **dict(record, attestation='error attestation', verification_receipt='error receipt',
+                   analysis_outcome='failed', attempt_binding='mismatch'),
+        )
+
+        job = _job(engine, job_id)
+        assert {field: job[field] for field in record} == record
+
+    def test_a_failed_run_holds_its_signed_record_and_a_later_run_without_one_clears_it(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-H-ERROR-RECORD')
+        record = dict(attestation='error attestation', verification_receipt='error receipt',
+                      enclave_version='1.7.0', enclave_pcr0='aa', analysis_outcome='failed', attempt_binding='bound')
+        repo.complete_job_with_held_output(
+            job_id, status='failed', kind='error', content='first error', error_message=HELD_ERROR_MESSAGE, **record,
+        )
+        job = _job(engine, job_id)
+        assert {field: job[field] for field in record} == record
+        assert (job['status'], job['release_status']) == ('failed', 'pending')
+
+        repo.complete_job_with_held_output(
+            job_id, status='failed', kind='error', content='second error', error_message=HELD_ERROR_MESSAGE,
+            **dict.fromkeys(record),
+        )
+
+        job = _job(engine, job_id)
+        assert {field: job[field] for field in record} == dict.fromkeys(record)
+        assert _held(engine, job_id)['content'] == 'second error'
+
+    def test_recording_an_attempt_sets_only_the_attempt_id(self, repo, engine):
+        job_id = _new_job(engine, 'JOB-H-ATTEMPT')
+        repo.complete_job_with_held_output(
+            job_id, status='failed', kind='error', content='first error', error_message=HELD_ERROR_MESSAGE,
+            attestation='error attestation', analysis_outcome='failed', attempt_binding='bound',
+        )
+
+        repo.record_execution_attempt(job_id, 'a1' * 16)
+        repo.record_execution_attempt(job_id, 'b2' * 16)
+
+        job = _job(engine, job_id)
+        assert job['execution_attempt_id'] == 'b2' * 16
+        assert (job['attestation'], job['analysis_outcome'], job['attempt_binding']) == (
+            'error attestation', 'failed', 'bound',
+        )
+        assert (job['status'], job['release_status']) == ('failed', 'pending')
+        assert repo.get_job(job_id)['execution_attempt_id'] == 'b2' * 16
+
+    def test_recording_an_attempt_for_an_unknown_job_is_refused(self, repo):
+        with pytest.raises(ValueError, match='not found'):
+            repo.record_execution_attempt('JOB-H-NO-SUCH-JOB', 'a1' * 16)
 
     @pytest.mark.parametrize('decision, final_status', [('approve', 'released'), ('reject', 'withheld')])
     def test_leaves_job_outputs_alone_after_a_decision(self, repo, engine, decision, final_status):

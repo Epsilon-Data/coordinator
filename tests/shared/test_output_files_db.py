@@ -59,7 +59,6 @@ pytestmark = pytest.mark.skipif(
 
 PROJECT_REVISION = 'c5e2a8d4b7f1'
 FILES_REVISION = 'd8b4f1a6c3e9'
-PATHS_REVISION = 'f2b7d5e9a1c4'
 CONTENT = 'count=7\n'
 
 
@@ -363,12 +362,35 @@ class TestMigration:
                 database.close()
 
 
-def _hold_flat_files_at_files_revision(engine, repo):
-    """Held files as production has them at d8b4f1a6c3e9: flat names, one at the old 100-character limit."""
+HOLD_RESULT_SQL = (
+    "INSERT INTO job_outputs (job_id, kind, content, content_sha256, attested_output_hash, files_manifest_sha256) "
+    "VALUES (:job_id, 'result', :content, :sha, :sha, :manifest)"
+)
+HOLD_FILE_SQL = (
+    "INSERT INTO job_output_files (job_id, name, size, content_type, sha256, storage_key) "
+    "VALUES (:job_id, :name, :size, :content_type, :sha256, :storage_key)"
+)
+HOLD_JOB_SQL = (
+    "UPDATE job_requests SET status = 'success', release_status = 'pending', output_sha256 = :sha "
+    "WHERE job_id = :job_id"
+)
+
+
+def _hold_flat_files_at_files_revision(engine):
+    """Held files as production has them at d8b4f1a6c3e9: flat names, one at the old 100-character limit.
+
+    Written as SQL: the repository maps columns that later revisions add.
+    """
     job_id = _new_job(engine, 'JOB-F-PROD-FILES')
     files = [_file(job_id, 'table.csv', b'a,b\n'), _file(job_id, 'chart.png', b'png', 'image/png'),
              _file(job_id, 'x' * 96 + '.txt', b'notes', 'text/plain')]
-    _hold(repo, job_id, files)
+    with engine.begin() as conn:
+        conn.execute(text(HOLD_RESULT_SQL), {
+            'job_id': job_id, 'content': CONTENT, 'sha': _sha256(CONTENT), 'manifest': _manifest(files),
+        })
+        for held_file in files:
+            conn.execute(text(HOLD_FILE_SQL), {'job_id': job_id, **held_file})
+        conn.execute(text(HOLD_JOB_SQL), {'job_id': job_id, 'sha': _sha256(CONTENT)})
     return job_id, files
 
 
@@ -388,12 +410,12 @@ class TestPathsMigration:
             database = Database(url)
             try:
                 engine, repo = database.engine, JobRepository(database)
-                flat_job, flat_files = _hold_flat_files_at_files_revision(engine, repo)
+                flat_job, flat_files = _hold_flat_files_at_files_revision(engine)
                 files_column = _name_column(engine)
                 assert files_column[0] == 100
 
                 _alembic(url, command.upgrade, 'head')
-                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': PATHS_REVISION}]
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
                 length, check = _name_column(engine)
                 assert length == 255 and '{0,4}' in check and 'char_length' in check
                 assert _file_rows(engine, flat_job) == sorted(flat_files, key=lambda f: f['name'])
@@ -403,7 +425,7 @@ class TestPathsMigration:
                 _hold(repo, path_job, [_file(path_job, 'plots/fig.bin', b'\x00', 'application/octet-stream')])
                 with pytest.raises(DBAPIError, match='refusing to downgrade'):
                     _alembic(url, command.downgrade, FILES_REVISION)
-                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': PATHS_REVISION}]
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
 
                 with engine.begin() as conn:
                     conn.execute(text('DELETE FROM job_output_files WHERE job_id = :job_id'), {'job_id': path_job})
@@ -413,7 +435,7 @@ class TestPathsMigration:
                 assert _file_rows(engine, flat_job) == sorted(flat_files, key=lambda f: f['name'])
 
                 _alembic(url, command.upgrade, 'head')
-                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': PATHS_REVISION}]
+                assert _rows(engine, 'SELECT version_num FROM alembic_version') == [{'version_num': HEAD_REVISION}]
             finally:
                 database.close()
 

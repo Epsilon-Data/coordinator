@@ -70,6 +70,15 @@ class JobRequest(Base):
     job_id_committed: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     researcher_nonce: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # Execution attempt and signed run outcome (migration a3d6f8b2c7e1).
+    # execution_attempt_id is written before dispatch and replaced by each new
+    # attempt; it is what the enclave's signed attempt_id is compared with.
+    # analysis_outcome is copied from an authentic signed record only. The signed exit
+    # code is chosen by the script, so it stays in the verification receipt (held until release).
+    execution_attempt_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    analysis_outcome: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    attempt_binding: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
     # ATL inclusion receipts. JSON-serialized; the ATL log itself is the
     # authoritative source, this is a convenience copy so the portal can
     # display tree_size / leaf_index without re-querying the log.

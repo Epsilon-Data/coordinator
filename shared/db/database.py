@@ -43,6 +43,13 @@ FIELD_MAPPING = {
 }
 
 
+# Fields that describe one run's signed record; they stay with the held output they belong to
+SIGNED_RECORD_FIELDS = frozenset({
+    'attestation', 'verification_receipt', 'enclave_version', 'enclave_pcr0',
+    'analysis_outcome', 'attempt_binding',
+})
+
+
 class ProjectChangedError(Exception):
     """The job already has a different project or archetype recorded (RG025)."""
 
@@ -166,6 +173,21 @@ class JobRepository:
             # Convert to dict for backward compatibility
             return self._job_to_dict(job)
 
+    def record_execution_attempt(self, job_id: str, attempt_id: str) -> None:
+        """Store the id of the attempt about to be dispatched (the job's latest attempt).
+
+        The outcome columns are left alone: they describe the stored signed record and
+        change only with it, in complete_job_with_held_output. The verification receipt
+        records which attempt its record was checked against.
+        """
+        with self.db.get_session() as session:
+            job = session.get(JobRequest, job_id, with_for_update={'key_share': True})
+            if not job:
+                raise ValueError(f"Job {job_id} not found")
+            job.execution_attempt_id = attempt_id
+            job.updated_at = datetime.now(timezone.utc)
+        logger.info(f"Recorded execution attempt {attempt_id} for job {job_id}")
+
     def complete_job_with_held_output(
         self,
         job_id: str,
@@ -231,6 +253,8 @@ class JobRepository:
                 )
             elif held is not None and held.kind == 'result' and kind == 'error':
                 logger.warning(f"Job {job_id} already holds a result; not replacing it with an error")
+                # The kept result keeps its own signed record, receipt and outcome
+                fields = {key: value for key, value in fields.items() if key not in SIGNED_RECORD_FIELDS}
             else:
                 if held is None:
                     held = JobOutput(job_id=job_id)
@@ -556,6 +580,9 @@ class JobRepository:
             'enclave_pcr0': job.enclave_pcr0,
             'job_id_committed': job.job_id_committed,
             'researcher_nonce': job.researcher_nonce,
+            'execution_attempt_id': job.execution_attempt_id,
+            'analysis_outcome': job.analysis_outcome,
+            'attempt_binding': job.attempt_binding,
             'release_status': job.release_status,
             'ai_decision': job.ai_decision,
             'output_sha256': job.output_sha256,
