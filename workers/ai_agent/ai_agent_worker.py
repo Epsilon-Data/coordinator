@@ -10,6 +10,8 @@ from shared import config
 from shared.db import job_repository
 from shared.job_logger import JobLogger
 from shared.base_worker import AIWorkerBase
+from shared.process_hardening import deny_same_user_inspection
+from workers.ai_agent.access_gate import ReviewAccess, ReviewAccessGate
 from workers.ai_agent.analyzer import analyze_repository
 from workers.ai_agent.schemas import AnalysisDecision
 
@@ -18,6 +20,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Stored as the reasoning of a review that did not run; the Research Workspace shows
+# reasoning with this prefix as "AI review unavailable"
+REVIEW_NOT_RUN_PREFIX = "AI analysis error: the review was not run"
 
 
 class AIAgentWorker(AIWorkerBase):
@@ -31,6 +37,7 @@ class AIAgentWorker(AIWorkerBase):
             self.analysis_path.mkdir(parents=True, exist_ok=True)
             self._setup_environment()
             self.job_logger = JobLogger(self.worker_name)
+            self.access_gate = ReviewAccessGate.from_environment()
         except ValueError as e:
             logger.error(f"Configuration error: {e}")
             sys.exit(1)
@@ -40,6 +47,12 @@ class AIAgentWorker(AIWorkerBase):
         if not os.getenv("OPENAI_API_KEY"):
             logger.error("OPENAI_API_KEY not set")
             raise ValueError("OPENAI_API_KEY environment variable is required")
+        # The review executes submitted code as a child of this process: it must not be
+        # able to read this process's environment or memory
+        if deny_same_user_inspection():
+            logger.info("Worker process marked not dumpable")
+        elif sys.platform.startswith("linux"):
+            raise ValueError("the worker process could not be protected from the code it executes")
 
     def _save_analysis_result(self, job_id: str, decision: AnalysisDecision) -> Path:
         """Save analysis results to file"""
@@ -70,6 +83,12 @@ class AIAgentWorker(AIWorkerBase):
         metadata = message.get('metadata', {})
 
         logger.info(f"Processing AI analysis for job {job_id}")
+
+        # No code of the job is executed unless its submitter is approved for its project
+        access = self.access_gate.decide(job_id, str(repo_path))
+        if not access.allowed:
+            self._skip_review(job_id, access)
+            return
 
         try:
             # Log start
@@ -145,6 +164,22 @@ class AIAgentWorker(AIWorkerBase):
                 )
             except Exception as store_err:
                 logger.error(f"Failed to store AI error for {job_id}: {store_err}")
+
+    def _skip_review(self, job_id: str, access) -> None:
+        """Record that the review did not run. Nothing of the job was executed."""
+        logger.warning(f"AI review of job {job_id} not run: {access.reason}")
+        if access.status == ReviewAccess.UNDECIDED:
+            # Left unanalysed: a later poll asks again, until the executor ends the job
+            return
+        try:
+            job_repository.update_job_ai_results(
+                job_id=job_id,
+                ai_confidence_score=0.0,
+                ai_reasoning=f"{REVIEW_NOT_RUN_PREFIX}: {access.reason}",
+                ai_decision="ai_error",
+            )
+        except Exception as store_err:
+            logger.error(f"Failed to store the skipped AI review for {job_id}: {store_err}")
 
     def process_job(self, job: Dict[str, Any]) -> bool:
         """Process a single AI analysis job."""

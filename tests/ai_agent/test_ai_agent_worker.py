@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from workers.ai_agent.access_gate import ReviewAccess, ReviewAccessDecision
 from workers.ai_agent.ai_agent_worker import AIAgentWorker, main
 from workers.ai_agent.schemas import AnalysisDecision
 
@@ -36,8 +37,21 @@ class TestAIAgentWorker:
             MockLogger.return_value = mock_logger
             yield mock_logger
 
+    @pytest.fixture(autouse=True)
+    def process_protection(self):
+        # The real call would mark the test process itself not dumpable
+        with patch("workers.ai_agent.ai_agent_worker.deny_same_user_inspection", return_value=True) as deny:
+            yield deny
+
     @pytest.fixture
-    def worker(self, mock_config, mock_job_repository, mock_job_logger, tmp_path, monkeypatch):
+    def access_gate(self):
+        with patch("workers.ai_agent.ai_agent_worker.ReviewAccessGate") as gate_class:
+            gate = gate_class.from_environment.return_value
+            gate.decide.return_value = ReviewAccessDecision(ReviewAccess.ALLOWED, "approved")
+            yield gate
+
+    @pytest.fixture
+    def worker(self, mock_config, mock_job_repository, mock_job_logger, access_gate, tmp_path, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         w = AIAgentWorker()
         w.analysis_path = tmp_path / "ai_analysis"
@@ -59,6 +73,60 @@ class TestAIAgentWorker:
         """Worker initializes correctly."""
         assert worker.worker_name == "AIAgentWorker"
         assert worker.analysis_path.exists()
+
+    def test_worker_is_protected_from_the_code_it_executes(self, worker, process_protection):
+        process_protection.assert_called_once_with()
+
+    def test_worker_does_not_start_unprotected_on_linux(
+        self, mock_config, mock_job_repository, mock_job_logger, access_gate, process_protection, monkeypatch,
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        process_protection.return_value = False
+        with patch("workers.ai_agent.ai_agent_worker.sys.platform", "linux"), pytest.raises(SystemExit):
+            AIAgentWorker()
+
+    @patch("workers.ai_agent.ai_agent_worker.analyze_repository")
+    def test_review_runs_only_after_the_access_check(self, mock_analyze, worker, sample_job, access_gate, sample_analysis_decision):
+        order = MagicMock()
+        order.attach_mock(access_gate.decide, "decide")
+        order.attach_mock(mock_analyze, "analyze")
+        mock_analyze.return_value = sample_analysis_decision
+
+        worker.process_job(sample_job)
+
+        assert [c[0] for c in order.mock_calls] == ["decide", "analyze"]
+        assert access_gate.decide.call_args.args == ("JOB-AI-001", "/tmp/test-storage/repositories/JOB-AI-001")
+
+    @patch("workers.ai_agent.ai_agent_worker.analyze_repository")
+    def test_no_code_is_executed_for_a_submitter_who_is_not_approved(
+        self, mock_analyze, worker, sample_job, access_gate, mock_job_repository,
+    ):
+        access_gate.decide.return_value = ReviewAccessDecision(
+            ReviewAccess.REFUSED, "the submitter is not approved for project p-1",
+        )
+
+        assert worker.process_job(sample_job) is True
+
+        mock_analyze.assert_not_called()
+        stored = mock_job_repository.update_job_ai_results.call_args.kwargs
+        assert stored["ai_decision"] == "ai_error"
+        assert stored["ai_reasoning"] == (
+            "AI analysis error: the review was not run: the submitter is not approved for project p-1"
+        )
+        mock_job_repository.update_job_status.assert_not_called()
+
+    @patch("workers.ai_agent.ai_agent_worker.analyze_repository")
+    def test_no_code_is_executed_while_access_cannot_be_checked(
+        self, mock_analyze, worker, sample_job, access_gate, mock_job_repository,
+    ):
+        access_gate.decide.return_value = ReviewAccessDecision(ReviewAccess.UNDECIDED, "access could not be checked")
+
+        assert worker.process_job(sample_job) is True
+
+        mock_analyze.assert_not_called()
+        # Left unanalysed, so a later poll asks again
+        mock_job_repository.update_job_ai_results.assert_not_called()
+        mock_job_repository.update_job_status.assert_not_called()
 
     def test_initialization_requires_openai_key(self, mock_config, mock_job_repository, mock_job_logger, monkeypatch):
         """Raises when OPENAI_API_KEY is missing."""

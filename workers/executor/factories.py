@@ -27,7 +27,7 @@ def _enclave_clients() -> dict:
     }
 
 
-def _resolve_enclave_backend(enclave_settings) -> str:
+def resolve_enclave_backend(enclave_settings) -> str:
     """Resolve the backend: explicit ``backend``, else legacy ``use_local_client``, else Nitro."""
     if enclave_settings.backend:
         return enclave_settings.backend
@@ -55,7 +55,7 @@ class EnclaveClientFactory:
         if settings is None:
             settings = get_settings()
 
-        backend = _resolve_enclave_backend(settings.enclave)
+        backend = resolve_enclave_backend(settings.enclave)
         clients = _enclave_clients()
         try:
             client_cls = clients[backend]
