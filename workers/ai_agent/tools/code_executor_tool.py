@@ -18,11 +18,17 @@ from workers.ai_agent.utils import find_main_script, find_requirements_path, MAI
 
 logger = logging.getLogger(__name__)
 
-# Only these env vars are passed to the subprocess
+# Only these env vars are passed to the subprocesses (dependency install and the script).
+# Everything else the worker holds (DATABASE_URL, API keys, client secrets) stays out.
 _ENV_WHITELIST = {
     "PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "TMPDIR",
     "VIRTUAL_ENV", "PYTHONUNBUFFERED", "SHARED_STORAGE_PATH", "EPSILON_JOB_ID",
 }
+
+
+def _subprocess_env() -> Dict[str, str]:
+    """The worker's environment reduced to the whitelist."""
+    return {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
 
 
 class CodeExecutorTool(BaseTool):
@@ -77,14 +83,15 @@ class CodeExecutorTool(BaseTool):
 
         if requirements_file and requirements_file.exists():
             try:
-                # WARNING: installs packages from untrusted user repos.
-                # Runs inside an isolated enclave container — no host impact.
+                # WARNING: installs packages from untrusted user repos, which can run
+                # their own setup code: it gets the whitelisted environment only.
                 subprocess.run(
                     ["pip", "install", "-r", str(requirements_file)],
                     cwd=execution_path,
                     capture_output=True,
                     text=True,
-                    timeout=PIP_INSTALL_TIMEOUT
+                    timeout=PIP_INSTALL_TIMEOUT,
+                    env=_subprocess_env(),
                 )
                 return True
             except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
@@ -125,7 +132,7 @@ class CodeExecutorTool(BaseTool):
         # Execute the command
         try:
             # Only pass whitelisted env vars to subprocess
-            env = {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
+            env = _subprocess_env()
             env["EPSILON_JOB_ID"] = job_id
 
             start_time = time.time()

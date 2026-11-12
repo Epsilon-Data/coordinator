@@ -96,6 +96,29 @@ class TestCodeExecutorTool:
                     for key in env:
                         assert key in _ENV_WHITELIST or key == "EPSILON_JOB_ID"
 
+    def test_dependency_install_gets_the_whitelisted_environment_only(self, tool, exec_repo, tmp_path, monkeypatch):
+        """pip runs setup code from the submitted requirements: it must not see the worker's secrets."""
+        monkeypatch.setenv("SHARED_STORAGE_PATH", str(tmp_path))
+        monkeypatch.setenv("OPENAI_API_KEY", "secret-key")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://secret")
+        monkeypatch.setenv("EPSILON_COORDINATOR_CLIENT_SECRET", "client-secret")
+        (Path(exec_repo) / "requirements.txt").write_text("requests\n")
+        (Path(exec_repo) / "build" / "build.yml").write_text(
+            "analysis:\n  script_file: main.py\n  requirements: requirements.txt\n"
+        )
+
+        with patch("workers.ai_agent.tools.code_executor_tool.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            tool._run(exec_repo, "JOB-PIP")
+
+        pip_calls = [c for c in mock_run.call_args_list if c.args[0][0] == "pip"]
+        assert len(pip_calls) == 1
+        env = pip_calls[0].kwargs["env"]
+        assert set(env) <= _ENV_WHITELIST
+        assert "secret" not in repr(env)
+        # Every subprocess the tool starts gets an explicit environment
+        assert all("env" in c.kwargs for c in mock_run.call_args_list)
+
     def test_path_traversal_blocked(self, tool, tmp_path, monkeypatch):
         """Path traversal in script_file is blocked."""
         monkeypatch.setenv("SHARED_STORAGE_PATH", str(tmp_path))

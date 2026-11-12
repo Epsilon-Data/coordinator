@@ -123,6 +123,10 @@ services:
       SHARED_STORAGE_PATH: /shared/epsilon
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       CREWAI_LLM_MODEL: ${CREWAI_LLM_MODEL:-gpt-4o-mini}
+      # Project access check (Epsilon API); no job's code is executed for review without it
+      EPSILON_API_URL: ${EPSILON_API_URL}
+      EPSILON_COORDINATOR_CLIENT_ID: ${EPSILON_COORDINATOR_CLIENT_ID:-coordinator-client}
+      EPSILON_COORDINATOR_CLIENT_SECRET: ${EPSILON_COORDINATOR_CLIENT_SECRET}
       POLLING_INTERVAL: ${POLLING_INTERVAL:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
